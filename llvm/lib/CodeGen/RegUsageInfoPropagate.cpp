@@ -31,11 +31,22 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <sstream>
+
 using namespace llvm;
 
 #define DEBUG_TYPE "ip-regalloc"
 
 #define RUIP_NAME "Register Usage Information Propagation"
+
+
+static cl::opt<std::string>
+    IPRAProfile("ipra-profile", cl::init(""), cl::value_desc("filename"), cl::Hidden,
+               cl::desc("Profile for FDO based interprocedural register allocation "
+                        "to reduce load/store at procedure calls."));
 
 namespace {
 
@@ -96,9 +107,50 @@ static const Function *findCalledFunction(const Module &M,
   return nullptr;
 }
 
+struct IRPAProfile {
+  std::set<std::string> HotFunctions;
+  std::map<std::string, std::set<unsigned>> HotBasicBlocks;
+
+  void readProfile(const std::string &Filename) {
+    std::ifstream File(Filename);
+    if (!File.is_open())
+      return;
+    std::string name; 
+    while (std::getline(File, name)) {
+      std::string bb_idx_vec;
+      std::getline(File, bb_idx_vec);
+      std::stringstream ss(bb_idx_vec);
+      std::set<unsigned> BBs;
+
+      unsigned BB_index;
+      while (ss >> BB_index)
+        BBs.insert(BB_index);
+      
+      HotBasicBlocks[name] = BBs;
+      HotFunctions.insert(name);
+    }
+  }
+
+  bool isHot(StringRef str) {
+    return HotFunctions.count(str.str());
+  }
+  bool isHotBB(std::set<unsigned>& s, unsigned BB_index) {
+    return s.count(BB_index);
+  }
+};
+
+
 bool RegUsageInfoPropagation::runOnMachineFunction(MachineFunction &MF) {
   const Module &M = *MF.getFunction().getParent();
   PhysicalRegisterUsageInfo *PRUI = &getAnalysis<PhysicalRegisterUsageInfo>();
+  
+  // IRPAProfile Profile;
+  // bool enable_profile = false;
+  // if (IPRAProfile != "") {
+  //   std::cout << "Load IPRAProf: "  << IPRAProfile << std::endl;
+  //   Profile.readProfile(IPRAProfile);
+  //   if (Profile.isHot(MF.getName())) enable_profile = true;
+  // }
 
   LLVM_DEBUG(dbgs() << " ++++++++++++++++++++ " << getPassName()
                     << " ++++++++++++++++++++  \n");
@@ -109,11 +161,16 @@ bool RegUsageInfoPropagation::runOnMachineFunction(MachineFunction &MF) {
     return false;
 
   bool Changed = false;
-
+  // std::set<unsigned>* s;
+  // if (enable_profile) 
+  //   s = &Profile.HotBasicBlocks[MF.getName().str()];
   for (MachineBasicBlock &MBB : MF) {
+    // bool enable_BB_profile = false;
+    // if (enable_profile && Profile.isHotBB(*s, MBB.getNumber())) enable_BB_profile = true;
     for (MachineInstr &MI : MBB) {
       if (!MI.isCall())
         continue;
+      // if (enable_profile && !enable_BB_profile) continue;
       LLVM_DEBUG(
           dbgs()
           << "Call Instruction Before Register Usage Info Propagation : \n"
