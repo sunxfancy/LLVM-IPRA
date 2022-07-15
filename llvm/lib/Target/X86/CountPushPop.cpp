@@ -21,6 +21,7 @@ public:
     CountPushPop() : MachineFunctionPass(ID) {}
     
     bool runOnMachineFunction(MachineFunction &MF) override {
+        // printf("run on function %s\n", MF.getName().str().c_str());
         auto PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
         auto MBFI = (PSI && PSI->hasProfileSummary()) ?
          &getAnalysis<LazyMachineBlockFrequencyInfoPass>().getBFI() :
@@ -45,9 +46,12 @@ public:
         return false;
     }
 
-    bool doFinalization(Module &) override { 
-        printf("push count: %d\n", PushCount.getValue());
-        printf("pop count: %d\n", PopCount.getValue());
+    bool doFinalization(Module &) override {  
+        FILE* pOut = fopen("/tmp/count-push-pop.txt", "a");
+
+        fprintf(pOut, "push count: %d\n", PushCount.getValue());
+        fprintf(pOut, "pop count: %d\n", PopCount.getValue());
+        fclose(pOut);
         return false; 
     }
 

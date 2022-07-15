@@ -547,7 +547,6 @@ void X86PassConfig::addPostRegAlloc() {
 
 void X86PassConfig::addPreSched2() { 
   addPass(createX86ExpandPseudoPass()); 
-  addPass(createCountPushPopPass());
 }
 
 void X86PassConfig::addPreEmitPass() {
@@ -611,6 +610,9 @@ void X86PassConfig::addPreEmitPass2() {
 
   // Insert pseudo probe annotation for callsite profiling
   addPass(createPseudoProbeInserter());
+
+  // Add count push pop pass for study the register savings
+  addPass(createCountPushPopPass());
 
   // On Darwin platforms, BLR_RVMARKER pseudo instructions are lowered to
   // bundles.
