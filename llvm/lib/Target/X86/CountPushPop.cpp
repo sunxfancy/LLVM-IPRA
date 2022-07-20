@@ -46,9 +46,13 @@ public:
         return false;
     }
 
-    bool doFinalization(Module &) override {  
+    bool doFinalization(Module &M) override {  
         FILE* pOut = fopen("/tmp/count-push-pop.txt", "a");
 
+        auto PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
+        auto has_profile = (PSI && PSI->hasProfileSummary());
+        if (has_profile) fprintf(pOut, "dynamic counting %s\n", M.getName().str().c_str());
+        else fprintf(pOut, "static counting %s\n", M.getName().str().c_str());
         fprintf(pOut, "push count: %d\n", PushCount.getValue());
         fprintf(pOut, "pop count: %d\n", PopCount.getValue());
         fclose(pOut);
