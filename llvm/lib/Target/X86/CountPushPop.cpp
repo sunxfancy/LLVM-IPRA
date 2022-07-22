@@ -17,7 +17,7 @@ ALWAYS_ENABLED_STATISTIC(PopCount, "pop count");
 class CountPushPop : public MachineFunctionPass {
 public:
     static char ID; 
-    
+    static bool has_profile;
     CountPushPop() : MachineFunctionPass(ID) {}
     
     bool runOnMachineFunction(MachineFunction &MF) override {
@@ -26,6 +26,7 @@ public:
         auto MBFI = (PSI && PSI->hasProfileSummary()) ?
          &getAnalysis<LazyMachineBlockFrequencyInfoPass>().getBFI() :
          nullptr;
+        if (MBFI) has_profile = true;
         for (auto &MBB : MF) {
             for (auto &MI : MBB) {
                 // MI.getFlag(MachineInstr::FrameSetup) && 
@@ -48,14 +49,13 @@ public:
 
     bool doFinalization(Module &M) override {  
         FILE* pOut = fopen("/tmp/count-push-pop.txt", "a");
-
-        auto PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
-        auto has_profile = (PSI && PSI->hasProfileSummary());
-        if (has_profile) fprintf(pOut, "dynamic counting %s\n", M.getName().str().c_str());
-        else fprintf(pOut, "static counting %s\n", M.getName().str().c_str());
-        fprintf(pOut, "push count: %d\n", PushCount.getValue());
-        fprintf(pOut, "pop count: %d\n", PopCount.getValue());
-        fclose(pOut);
+        if (pOut) {
+            if (has_profile) fprintf(pOut, "dynamic counting %s\n", M.getName().str().c_str());
+            else fprintf(pOut, "static counting %s\n", M.getName().str().c_str());
+            fprintf(pOut, "push count: %zu\n", PushCount.getValue());
+            fprintf(pOut, "pop count: %zu\n", PopCount.getValue());
+            fclose(pOut);
+        }
         return false; 
     }
 
@@ -69,6 +69,7 @@ public:
 };
 }
 
+bool CountPushPop::has_profile = false;
 char CountPushPop::ID = 0;
 static RegisterPass<CountPushPop> X("count-push-pop", "Count Push/Pop Pass");
 
