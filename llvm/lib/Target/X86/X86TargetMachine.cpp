@@ -66,6 +66,8 @@ static cl::opt<bool>
                      cl::desc("Enable the tile register allocation pass"),
                      cl::init(true), cl::Hidden);
 
+static cl::opt<bool> EnableCPPP("count-push-pop", cl::Hidden, cl::init(false), cl::desc("Enable counting push and pop"));
+
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
   // Register the target.
   RegisterTargetMachine<X86TargetMachine> X(getTheX86_32Target());
@@ -612,7 +614,7 @@ void X86PassConfig::addPreEmitPass2() {
   addPass(createPseudoProbeInserter());
 
   // Add count push pop pass for study the register savings
-  addPass(createCountPushPopPass());
+  if (EnableCPPP) addPass(createCountPushPopPass());
 
   // On Darwin platforms, BLR_RVMARKER pseudo instructions are lowered to
   // bundles.

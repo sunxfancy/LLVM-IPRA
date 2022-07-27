@@ -57,6 +57,7 @@ add_llvm_component_library(LLVMCodeGen
   ExpandReductions.cpp
   ExpandVectorPredication.cpp
   FaultMaps.cpp
+  FDOAttrModificationPass.cpp
   FEntryInserter.cpp
   FinalizeISel.cpp
   FixupStatepointCallerSaved.cpp

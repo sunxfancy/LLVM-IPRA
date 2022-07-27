@@ -388,6 +388,10 @@ struct InsertedPass {
 namespace llvm {
 
 extern cl::opt<bool> EnableFSDiscriminator;
+extern Pass* createFDOAttrModification2Pass();
+
+static cl::opt<bool> FDO_IPRA("fdo-ipra", cl::Hidden, cl::init(false), cl::desc("Enable FDO-based IPRA"));
+
 
 class PassConfigImpl {
 public:
@@ -1015,6 +1019,10 @@ void TargetPassConfig::addISelPrepare() {
     addPass(createPrintFunctionPass(
         dbgs(), "\n\n*** Final LLVM Code input to ISel ***\n"));
 
+  if (FDO_IPRA) {
+    addPass(createFDOAttrModification2Pass());
+  }
+
   // All passes which modify the LLVM IR are now complete; run the verifier
   // to ensure that the IR is valid.
   if (!DisableVerify)
@@ -1157,6 +1165,10 @@ void TargetPassConfig::addMachinePasses() {
     // to one another and simplify frame index references where possible.
     addPass(&LocalStackSlotAllocationID);
   }
+
+  // if (FDO_IPRA) {
+  //   addPass(createFDOAttrModificationPass());
+  // }
 
   if (TM->Options.EnableIPRA)
     addPass(createRegUsageInfoPropPass());
