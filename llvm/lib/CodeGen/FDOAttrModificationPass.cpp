@@ -137,7 +137,7 @@ bool FDOAttrModification2::runOnFunction(Function &MF) {
           if (MI.getOpcode() == Instruction::Call) {
             Function *callee = dyn_cast<CallInst>(&MI)->getCalledFunction();
             LLVM_DEBUG(dbgs() << "callee: " << callee->getName() << "\n");
-            if (callee->isDeclaration())
+            if (callee == nullptr || callee->isDeclaration())
               break;
             LLVM_DEBUG(dbgs() << "cold callee: " << callee->getName() << "\n");
             // if callee is cold
