@@ -914,6 +914,10 @@ void TargetPassConfig::addIRPasses() {
       TM->Options.LowerGlobalDtorsViaCxaAtExit)
     addPass(createLowerGlobalDtorsLegacyPass());
 
+  if (FDO_IPRA) {
+    addPass(createFDOAttrModification2Pass());
+  }
+  
   // Make sure that no unreachable blocks are instruction selected.
   addPass(createUnreachableBlockEliminationPass());
 
@@ -1019,9 +1023,9 @@ void TargetPassConfig::addISelPrepare() {
     addPass(createPrintFunctionPass(
         dbgs(), "\n\n*** Final LLVM Code input to ISel ***\n"));
 
-  if (FDO_IPRA) {
-    addPass(createFDOAttrModification2Pass());
-  }
+  // if (FDO_IPRA) {
+  //   addPass(createFDOAttrModification2Pass());
+  // }
 
   // All passes which modify the LLVM IR are now complete; run the verifier
   // to ensure that the IR is valid.

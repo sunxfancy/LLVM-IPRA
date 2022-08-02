@@ -12,6 +12,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Analysis/CallGraph.h"
 
 using namespace llvm;
 
@@ -97,9 +98,9 @@ bool FDOAttrModification::runOnMachineFunction(MachineFunction &MF) {
 
 Pass *createFDOAttrModificationPass() { return new FDOAttrModification(); }
 
-class FDOAttrModification2 : public FunctionPass {
+class FDOAttrModification2 : public ModulePass {
 public:
-  FDOAttrModification2() : FunctionPass(ID) {}
+  FDOAttrModification2() : ModulePass(ID) {}
 
   StringRef getPassName() const override {
     return "FDO based Attributes Modification Pass";
@@ -108,10 +109,10 @@ public:
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<ProfileSummaryInfoWrapperPass>();
     AU.setPreservesAll();
-    FunctionPass::getAnalysisUsage(AU);
+    ModulePass::getAnalysisUsage(AU);
   }
 
-  bool runOnFunction(Function &MF) override;
+  bool runOnModule(Module &M) override;
 
 protected:
   static char ID;
@@ -119,38 +120,41 @@ protected:
 
 char FDOAttrModification2::ID = 0;
 
-bool FDOAttrModification2::runOnFunction(Function &MF) {
+bool FDOAttrModification2::runOnModule(Module &M) {
   auto PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
   bool has_profile = PSI && PSI->hasProfileSummary();
   if (has_profile) {
-    LLVM_DEBUG(dbgs() << "caller has profile: " << MF.getName() << "\n");
-    LLVM_DEBUG(dbgs() << "hot threshod = " << PSI->getHotCountThreshold()
-                      << "\n");
-    LLVM_DEBUG(dbgs() << "func addr: " << (&MF.getFunction())
-                      << "  func count: "
-                      << MF.getFunction().getEntryCount()->getCount() << "\n");
-    // this is a hot function
-    if (PSI->isFunctionEntryHot(&MF.getFunction())) {
-      LLVM_DEBUG(dbgs() << "hot caller: " << MF.getName() << "\n");
-      for (auto &MBB : MF)
-        for (auto &MI : MBB)
-          if (MI.getOpcode() == Instruction::Call) {
-            Function *callee = dyn_cast<CallInst>(&MI)->getCalledFunction();
-            LLVM_DEBUG(dbgs() << "callee: " << callee->getName() << "\n");
-            if (callee == nullptr || callee->isDeclaration())
-              break;
-            LLVM_DEBUG(dbgs() << "cold callee: " << callee->getName() << "\n");
-            // if callee is cold
-            if (PSI->isFunctionEntryCold(callee)) {
-              LLVM_DEBUG(dbgs() << "Adding attributes from hot " << MF.getName()
-                                << " to cold " << callee->getName() << "\n");
-              if (callee->hasFnAttribute("no_caller_saved_registers") ==
-                  false) {
-                callee->addFnAttr("no_caller_saved_registers");
-                LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+    for (auto& F : M) {
+      if (F.isDeclaration()) continue;
+      LLVM_DEBUG(dbgs() << "caller has profile: " << F.getName() << "\n");
+      LLVM_DEBUG(dbgs() << "hot threshod = " << PSI->getHotCountThreshold()
+                        << "\n");
+      LLVM_DEBUG(dbgs() << "func addr: " << (&F.getFunction())
+                        << "  func count: "
+                        << F.getFunction().getEntryCount()->getCount() << "\n");
+      // this is a hot function
+      if (PSI->isFunctionEntryHot(&F.getFunction())) {
+        LLVM_DEBUG(dbgs() << "hot caller: " << F.getName() << "\n");
+        for (auto &MBB : F)
+          for (auto &MI : MBB)
+            if (MI.getOpcode() == Instruction::Call) {
+              Function *callee = dyn_cast<CallInst>(&MI)->getCalledFunction();
+              LLVM_DEBUG(dbgs() << "callee: " << callee->getName() << "\n");
+              if (callee == nullptr || callee->isDeclaration())
+                break;
+              LLVM_DEBUG(dbgs() << "cold callee: " << callee->getName() << "\n");
+              // if callee is cold
+              if (PSI->isFunctionEntryCold(callee)) {
+                LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
+                                  << " to cold " << callee->getName() << "\n");
+                if (callee->hasFnAttribute("no_caller_saved_registers") ==
+                    false) {
+                  callee->addFnAttr("no_caller_saved_registers");
+                  LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+                }
               }
             }
-          }
+      }
     }
   }
 

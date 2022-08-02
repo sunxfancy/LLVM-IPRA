@@ -873,6 +873,10 @@ unsigned X86RegisterInfo::findDeadCallerSavedReg(
   if (MBBI == MBB.end())
     return 0;
 
+  if (MBB.getParent()->getFunction().hasFnAttribute("no_caller_saved_registers")) {
+    return 0;
+  }
+
   switch (MBBI->getOpcode()) {
   default:
     return 0;
