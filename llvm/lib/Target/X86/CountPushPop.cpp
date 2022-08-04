@@ -2,9 +2,13 @@
 #include "llvm/CodeGen/LazyMachineBlockFrequencyInfo.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Option/ArgList.h"
 #include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86InstrBuilder.h"
 #include "X86InstrInfo.h"
+
+#include <string>
 
 using namespace llvm;
 
@@ -47,11 +51,17 @@ public:
         return false;
     }
 
+    bool doInitialization(Module &M) override {  
+        PushCount = 0;
+        PopCount = 0;
+        return false; 
+    }
+
     bool doFinalization(Module &M) override {  
         FILE* pOut = fopen("/tmp/count-push-pop.txt", "a");
         if (pOut) {
-            if (has_profile) fprintf(pOut, "dynamic counting %s\n", M.getName().str().c_str());
-            else fprintf(pOut, "static counting %s\n", M.getName().str().c_str());
+            if (has_profile) fprintf(pOut, "dynamic counting in %s\n", M.getName().str().c_str());
+            else fprintf(pOut, "static counting in %s\n", M.getName().str().c_str());
             fprintf(pOut, "push count: %zu\n", PushCount.getValue());
             fprintf(pOut, "pop count: %zu\n", PopCount.getValue());
             fclose(pOut);
