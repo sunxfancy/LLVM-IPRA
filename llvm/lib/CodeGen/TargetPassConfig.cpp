@@ -968,7 +968,7 @@ void TargetPassConfig::addPassesToHandleExceptions() {
     // pad is shared by multiple invokes and is also a target of a normal
     // edge from elsewhere.
     addPass(createSjLjEHPreparePass(TM));
-    LLVM_FALLTHROUGH;
+    [[fallthrough]];
   case ExceptionHandling::DwarfCFI:
   case ExceptionHandling::ARM:
   case ExceptionHandling::AIX:
