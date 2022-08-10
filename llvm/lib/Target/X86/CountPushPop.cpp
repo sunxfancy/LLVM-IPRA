@@ -81,7 +81,7 @@ public:
 
 bool CountPushPop::has_profile = false;
 char CountPushPop::ID = 0;
-static RegisterPass<CountPushPop> X("count-push-pop", "Count Push/Pop Pass");
+static RegisterPass<CountPushPop> X("push-pop-counter", "Count Push/Pop Pass");
 
 MachineFunctionPass* createCountPushPopPass() {
     return new CountPushPop();
