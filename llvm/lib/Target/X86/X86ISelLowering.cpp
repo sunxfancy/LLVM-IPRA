@@ -104,6 +104,29 @@ static void errorUnsupported(SelectionDAG &DAG, const SDLoc &dl,
       DiagnosticInfoUnsupported(MF.getFunction(), Msg, dl.getDebugLoc()));
 }
 
+
+
+static void printRegMask(const TargetRegisterInfo* TRI, const uint32_t* RegMask) {
+  errs() << "printRegMask: ";
+  for (unsigned i = 0; i < TRI->getNumRegs(); ++i) {
+    unsigned MaskWord = i / 32;
+    unsigned MaskBit = i % 32;
+    if (RegMask[MaskWord] & (1 << MaskBit))
+      errs() << " " << printReg(i, TRI);
+  }
+  errs() << "\n";
+}
+
+static void printRegsToPass(const TargetRegisterInfo* TRI, const SmallVector<std::pair<Register, SDValue>, 8>& RegsToPass) {
+  errs() << "printRegsToPass: ";
+  for (unsigned i = 0; i < RegsToPass.size(); ++i) {
+    errs() << " " << printReg(RegsToPass[i].first, TRI);
+  }
+  errs() << "\n";
+}
+
+
+
 X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
                                      const X86Subtarget &STI)
     : TargetLowering(TM), Subtarget(STI) {
@@ -3093,6 +3116,8 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
       CallConv == CallingConv::X86_RegCall ||
       MF.getFunction().hasFnAttribute("no_caller_saved_registers");
 
+  LLVM_DEBUG(errs() << "ShouldDisableCalleeSavedRegister = " << ShouldDisableCalleeSavedRegister << "\n");
+
   if (CallConv == CallingConv::X86_INTR && !Outs.empty())
     report_fatal_error("X86 interrupts may not return any value");
 
@@ -3107,8 +3132,10 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     assert(VA.isRegLoc() && "Can only return in registers!");
 
     // Add the register to the CalleeSaveDisableRegs list.
-    if (ShouldDisableCalleeSavedRegister)
+    if (ShouldDisableCalleeSavedRegister) {
       MF.getRegInfo().disableCalleeSavedRegister(VA.getLocReg());
+      LLVM_DEBUG(errs() << "VA = " << VA.getLocReg() << "\n");
+    }
 
     SDValue ValToCopy = OutVals[OutsIndex];
     EVT ValVT = ValToCopy.getValueType();
@@ -3429,6 +3456,17 @@ static SDValue lowerRegToMasks(const SDValue &ValArg, const EVT &ValVT,
   return DAG.getBitcast(ValVT, ValReturned);
 }
 
+
+static void removeUsedRegisters(llvm::Register Reg, const TargetRegisterInfo *TRI, uint32_t *RegMask) {
+  for (MCSubRegIterator SubRegs(Reg, TRI, /*IncludeSelf=*/true);
+        SubRegs.isValid(); ++SubRegs)
+    RegMask[*SubRegs / 32] &= ~(1u << (*SubRegs % 32));
+  for (MCSuperRegIterator SuperRegs(Reg, TRI, /*IncludeSelf=*/false);
+        SuperRegs.isValid(); ++SuperRegs)
+    RegMask[*SuperRegs / 32] &= ~(1u << (*SuperRegs % 32));
+}
+
+
 /// Lower the result values of a call into the
 /// appropriate copies out of appropriate physical registers.
 ///
@@ -3445,6 +3483,8 @@ SDValue X86TargetLowering::LowerCallResult(
                  *DAG.getContext());
   CCInfo.AnalyzeCallResult(Ins, RetCC_X86);
 
+  LLVM_DEBUG(errs() << "RVLocs.size() = " << RVLocs.size() << "\n");
+
   // Copy all of the result registers out of their specified physreg.
   for (unsigned I = 0, InsIndex = 0, E = RVLocs.size(); I != E;
        ++I, ++InsIndex) {
@@ -3454,9 +3494,9 @@ SDValue X86TargetLowering::LowerCallResult(
     // In some calling conventions we need to remove the used registers
     // from the register mask.
     if (RegMask) {
-      for (MCSubRegIterator SubRegs(VA.getLocReg(), TRI, /*IncludeSelf=*/true);
-           SubRegs.isValid(); ++SubRegs)
-        RegMask[*SubRegs / 32] &= ~(1u << (*SubRegs % 32));
+      removeUsedRegisters(VA.getLocReg(), TRI, RegMask);
+      LLVM_DEBUG(errs() << "LowerCallResult\n");
+      LLVM_DEBUG(printRegMask(TRI, RegMask));
     }
 
     // Report an error if there was an attempt to return FP values via XMM
@@ -4350,6 +4390,8 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   const Module *M = MF.getMMI().getModule();
   Metadata *IsCFProtectionSupported = M->getModuleFlag("cf-protection-branch");
 
+  LLVM_DEBUG(errs() << "CallSite: " << MF.getName() << " -> " << CB->getCalledFunction()->getName() << "\n");
+
   MachineFunction::CallSiteInfo CSInfo;
   if (CallConv == CallingConv::X86_INTR)
     report_fatal_error("X86 interrupts may not be called directly");
@@ -4784,6 +4826,9 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   }();
   assert(Mask && "Missing call preserved mask for calling convention");
 
+  LLVM_DEBUG(errs() << "CallConv = " << CallConv << "\n");
+  if (Mask) LLVM_DEBUG(printRegMask(Subtarget.getRegisterInfo(), Mask));
+
   // If this is an invoke in a 32-bit function using a funclet-based
   // personality, assume the function clobbers all registers. If an exception
   // is thrown, the runtime will not restore CSRs.
@@ -4814,10 +4859,11 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
     // Make sure all sub registers of the argument registers are reset
     // in the RegMask.
-    for (auto const &RegPair : RegsToPass)
-      for (MCSubRegIterator SubRegs(RegPair.first, TRI, /*IncludeSelf=*/true);
-           SubRegs.isValid(); ++SubRegs)
-        RegMask[*SubRegs / 32] &= ~(1u << (*SubRegs % 32));
+    LLVM_DEBUG(printRegsToPass(TRI, RegsToPass));
+
+    for (auto const &RegPair : RegsToPass) {
+      removeUsedRegisters(RegPair.first, TRI, RegMask);
+    }
 
     // Create the RegMask Operand according to our updated mask.
     Ops.push_back(DAG.getRegisterMask(RegMask));
@@ -4825,6 +4871,8 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     // Create the RegMask Operand according to the static mask.
     Ops.push_back(DAG.getRegisterMask(Mask));
   }
+
+  if (RegMask) LLVM_DEBUG(printRegMask(Subtarget.getRegisterInfo(), RegMask));
 
   if (InFlag.getNode())
     Ops.push_back(InFlag);
@@ -4890,6 +4938,13 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                                                      true),
                                InFlag, dl);
     InFlag = Chain.getValue(1);
+  }
+
+  if (RegMask && Outs.size() > 0 && Outs[0].Flags.isSRet()) {
+    const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
+    removeUsedRegisters(X86::RAX, TRI, RegMask);
+    LLVM_DEBUG(errs() << "Fixing:\n");
+    LLVM_DEBUG(printRegMask(TRI, RegMask));
   }
 
   // Handle result values, copying them out of physregs into vregs that we
