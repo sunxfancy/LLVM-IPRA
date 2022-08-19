@@ -15,13 +15,15 @@ using namespace llvm;
 #define DEBUG_TYPE "count-push-pop"
 
 namespace llvm {
-ALWAYS_ENABLED_STATISTIC(PushCount, "push count");
-ALWAYS_ENABLED_STATISTIC(PopCount, "pop count");
+ALWAYS_ENABLED_STATISTIC(PushCount, "dynamic push count");
+ALWAYS_ENABLED_STATISTIC(PopCount, "dynamic pop count");
+
+ALWAYS_ENABLED_STATISTIC(StaticPushCount, "static push count");
+ALWAYS_ENABLED_STATISTIC(StaticPopCount, "static pop count");
 
 class CountPushPop : public MachineFunctionPass {
 public:
     static char ID; 
-    static bool has_profile;
     CountPushPop() : MachineFunctionPass(ID) {}
     
     bool runOnMachineFunction(MachineFunction &MF) override {
@@ -30,20 +32,21 @@ public:
         auto MBFI = (PSI && PSI->hasProfileSummary()) ?
          &getAnalysis<LazyMachineBlockFrequencyInfoPass>().getBFI() :
          nullptr;
-        if (MBFI) has_profile = true;
         for (auto &MBB : MF) {
             for (auto &MI : MBB) {
                 // MI.getFlag(MachineInstr::FrameSetup) && 
                 if (MI.getOpcode() == X86::PUSH64r) {
                     if (MBFI) {
-                    auto p = MBFI->getBlockProfileCount(&MBB);
-                    if (p) PushCount += p.getValue();
-                    } else PushCount += 1;
+                        auto p = MBFI->getBlockProfileCount(&MBB);
+                        if (p) PushCount += p.getValue();
+                    } 
+                    StaticPushCount += 1;
                 } else if (MI.getOpcode() == X86::POP64r) {
                     if (MBFI) {
-                    auto p = MBFI->getBlockProfileCount(&MBB);
-                    if (p) PopCount += p.getValue();
-                    } else PopCount += 1;
+                        auto p = MBFI->getBlockProfileCount(&MBB);
+                        if (p) PopCount += p.getValue();
+                    } 
+                    StaticPopCount += 1;
                 }
             }
         }
@@ -54,16 +57,19 @@ public:
     bool doInitialization(Module &M) override {  
         PushCount = 0;
         PopCount = 0;
+        StaticPushCount = 0;
+        StaticPopCount = 0;
         return false; 
     }
 
     bool doFinalization(Module &M) override {  
         FILE* pOut = fopen("/tmp/count-push-pop.txt", "a");
         if (pOut) {
-            if (has_profile) fprintf(pOut, "dynamic counting in %s\n", M.getName().str().c_str());
-            else fprintf(pOut, "static counting in %s\n", M.getName().str().c_str());
-            fprintf(pOut, "push count: %zu\n", PushCount.getValue());
-            fprintf(pOut, "pop count: %zu\n", PopCount.getValue());
+            fprintf(pOut, "counting in %s\n", M.getName().str().c_str());
+            fprintf(pOut, "dynamic push count: %zu\n", PushCount.getValue());
+            fprintf(pOut, "dynamic pop  count: %zu\n", PopCount.getValue());
+            fprintf(pOut, "static  push count: %zu\n", StaticPushCount.getValue());
+            fprintf(pOut, "static  pop  count: %zu\n", StaticPopCount.getValue());
             fclose(pOut);
         }
         return false; 
@@ -79,7 +85,6 @@ public:
 };
 }
 
-bool CountPushPop::has_profile = false;
 char CountPushPop::ID = 0;
 static RegisterPass<CountPushPop> X("push-pop-counter", "Count Push/Pop Pass");
 
