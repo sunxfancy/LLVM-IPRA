@@ -15,11 +15,8 @@ using namespace llvm;
 #define DEBUG_TYPE "count-push-pop"
 
 namespace llvm {
-ALWAYS_ENABLED_STATISTIC(PushCount, "dynamic push count");
-ALWAYS_ENABLED_STATISTIC(PopCount, "dynamic pop count");
 
-ALWAYS_ENABLED_STATISTIC(StaticPushCount, "static push count");
-ALWAYS_ENABLED_STATISTIC(StaticPopCount, "static pop count");
+static std::mutex g_file_mutex;
 
 class CountPushPop : public MachineFunctionPass {
 public:
@@ -38,13 +35,13 @@ public:
                 if (MI.getOpcode() == X86::PUSH64r) {
                     if (MBFI) {
                         auto p = MBFI->getBlockProfileCount(&MBB);
-                        if (p) PushCount += p.getValue();
+                        if (p) PushCount += p.value();
                     } 
                     StaticPushCount += 1;
                 } else if (MI.getOpcode() == X86::POP64r) {
                     if (MBFI) {
                         auto p = MBFI->getBlockProfileCount(&MBB);
-                        if (p) PopCount += p.getValue();
+                        if (p) PopCount += p.value();
                     } 
                     StaticPopCount += 1;
                 }
@@ -53,6 +50,11 @@ public:
         
         return false;
     }
+
+    uint64_t PushCount;
+    uint64_t PopCount;
+    uint64_t StaticPushCount;
+    uint64_t StaticPopCount;
 
     bool doInitialization(Module &M) override {  
         PushCount = 0;
@@ -63,13 +65,14 @@ public:
     }
 
     bool doFinalization(Module &M) override {  
+        std::lock_guard<std::mutex> guard(g_file_mutex);
         FILE* pOut = fopen("/tmp/count-push-pop.txt", "a");
         if (pOut) {
             fprintf(pOut, "counting in %s\n", M.getName().str().c_str());
-            fprintf(pOut, "dynamic push count: %zu\n", PushCount.getValue());
-            fprintf(pOut, "dynamic pop  count: %zu\n", PopCount.getValue());
-            fprintf(pOut, "static  push count: %zu\n", StaticPushCount.getValue());
-            fprintf(pOut, "static  pop  count: %zu\n", StaticPopCount.getValue());
+            fprintf(pOut, "dynamic push count: %zu\n", PushCount);
+            fprintf(pOut, "dynamic pop  count: %zu\n", PopCount);
+            fprintf(pOut, "static  push count: %zu\n", StaticPushCount);
+            fprintf(pOut, "static  pop  count: %zu\n", StaticPopCount);
             fclose(pOut);
         }
         return false; 
