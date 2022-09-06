@@ -11,10 +11,13 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/RegisterUsageInfo.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Analysis/CallGraph.h"
@@ -25,7 +28,7 @@ using namespace llvm;
 
 static cl::opt<bool> OnHotEntryAndHotCallGraph("fdoipra-both-hot", cl::init(false), cl::Hidden);
 static cl::opt<bool> ColdCallsiteColdCallee("fdoipra-cc", cl::init(true), cl::Hidden);
-static cl::opt<bool> ColdCallsiteHotCallee ("fdoipra-ch", cl::init(true), cl::Hidden);
+static cl::opt<bool> ColdCallsiteHotCallee ("fdoipra-ch", cl::init(false), cl::Hidden);
 static cl::opt<bool> HotCallsiteColdCallee ("fdoipra-hc", cl::init(false), cl::Hidden);
 static cl::opt<bool> HotCallsiteHotCallee  ("fdoipra-hh", cl::init(false), cl::Hidden);
 
@@ -131,22 +134,48 @@ protected:
 char FDOAttrModification2::ID = 0;
 
 
-static Function* createProxyFunction(CallInst* Call, Module& M) {
-  Function* F = Call->getCalledFunction();
-  if (F == nullptr) {
-    LLVM_DEBUG(dbgs() << "createProxyFunction Failed: " << *Call << "\n");
-    return nullptr;
+
+static Function* completeFunction(Function* F, CallInst* Call) {
+  if (!F->isDeclaration()) return F;
+  F->setLinkage(GlobalValue::LinkageTypes::WeakAnyLinkage);
+  BasicBlock* BB = BasicBlock::Create(F->getContext(), "", F);
+  IRBuilder<> Builder(BB);
+  SmallVector<Value*, 12> arguments;
+  for (int i = 0; i < F->arg_size(); ++i) {
+    arguments.push_back(F->getArg(i));
   }
-  std::string name = F->getName().str();
-  std::string new_name = name + "$NCSRProxy";
-  LLVM_DEBUG(dbgs() << "createProxyFunction: " << new_name << "\n");
-  LLVM_DEBUG(dbgs() << "createProxyFunction: " << *F << "\n");
-  auto NF = M.getOrInsertFunction(new_name, F->getFunctionType(), F->getAttributes());
-  LLVM_DEBUG(dbgs() << *(NF.getFunctionType()) << "\n";);
-  LLVM_DEBUG(dbgs() << *(NF.getCallee()) << "\n";);
-  Call->setCalledFunction(NF);
-  return dyn_cast<Function>(NF.getCallee());
+  auto* call = Builder.CreateCall(Call->getFunctionType(), Call->getCalledOperand(), arguments);
+  if (F->getReturnType()->isVoidTy())
+    Builder.CreateRetVoid();
+  else
+    Builder.CreateRet(call);
+  return F;
 }
+
+static Function* createProxyFunction(CallInst* Call, Module& M) {
+  if (Call->isIndirectCall()) {
+    Function* NF = Function::Create(Call->getFunctionType(), GlobalValue::LinkageTypes::WeakAnyLinkage, "HC_NCSRProxy", M);
+    NF->addFnAttr(Attribute::AttrKind::NoInline);
+    Call->setCalledFunction(NF);
+    return completeFunction(NF, Call);
+  } else {
+    Function* F = Call->getCalledFunction();
+    if (F == nullptr) {
+      LLVM_DEBUG(dbgs() << "createProxyFunction Failed: " << *Call << "\n");
+      return nullptr;
+    }
+    std::string name = F->getName().str();
+    std::string new_name = name + "$NCSRProxy";
+    LLVM_DEBUG(dbgs() << "createProxyFunction: " << new_name << "\n");
+    LLVM_DEBUG(dbgs() << "createProxyFunction: " << *F << "\n");
+    auto NF = M.getOrInsertFunction(new_name, F->getFunctionType(), F->getAttributes());
+    LLVM_DEBUG(dbgs() << *(NF.getFunctionType()) << "\n";);
+    LLVM_DEBUG(dbgs() << *(NF.getCallee()) << "\n";);
+    Call->setCalledFunction(NF);
+    return completeFunction(dyn_cast<Function>(NF.getCallee()), Call);
+  }
+}
+
 
 
 bool FDOAttrModification2::runOnModule(Module &M) {
@@ -175,28 +204,27 @@ bool FDOAttrModification2::runOnModule(Module &M) {
         for (auto &MI : BB)
           if (MI.getOpcode() == Instruction::Call) {
             CallInst *call = dyn_cast<CallInst>(&MI);
-            Function *callee = call->getCalledFunction();
-            LLVM_DEBUG(dbgs() << "callee: " << callee->getName() << "\n");
-            if (callee == nullptr || callee->isDeclaration())
-              break;
-
+            
             if (ColdCallsiteColdCallee) {
-              // if callee is cold on entry
-              if (PSI->isFunctionEntryCold(callee)) {
-                LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
-                                  << " to cold " << callee->getName() << "\n");
-                if (callee->hasFnAttribute("no_caller_saved_registers") ==
-                    false) {
-                  callee->addFnAttr("no_caller_saved_registers");
-                  LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+              Function *callee = call->getCalledFunction();
+              if (callee && !callee->isDeclaration()) {
+
+                // if callee is cold on entry
+                if (PSI->isFunctionEntryCold(callee)) {
+                  LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
+                                    << " to cold " << callee->getName() << "\n");
+                  if (callee->hasFnAttribute("no_caller_saved_registers") == false) {
+                    callee->addFnAttr("no_caller_saved_registers");
+                    LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+                  }
                 }
               }
             }
 
             if (ColdCallsiteHotCallee) {
-              auto callsite = BFI.getBlockProfileCount(&BB);
-              // if callsit is cold and callee is not indirect call and   here we create another proxy function call
-              if (callsite.has_value() && callsite.value() < 50 && callee && PSI->isFunctionEntryHot(callee)) {
+              Function *callee = call->getCalledFunction();
+              // if callsit is cold and callee is not indirect call and here we create another proxy function call
+              if (callee && PSI->isColdCallSite(*call, &BFI) && PSI->isFunctionEntryHot(callee)) {
                 Function* NF = createProxyFunction(call, M);
                 if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
                   NF->addFnAttr("no_caller_saved_registers");
@@ -206,9 +234,16 @@ bool FDOAttrModification2::runOnModule(Module &M) {
             }
 
             if (HotCallsiteColdCallee) {
-              auto callsite = BFI.getBlockProfileCount(&BB);
-              if (call->isIndirectCall() && callsite.value() < 50) {
-                
+              if (call->isIndirectCall()) {
+                LLVM_DEBUG(dbgs() << "indirect call detected!\n" << *call << "\n");
+                LLVM_DEBUG(dbgs() << "isColdCallsite: " << PSI->isColdCallSite(*call, &BFI) << "\n");
+              }
+              if (call->isIndirectCall() && PSI->isColdCallSite(*call, &BFI)) {
+                Function* NF = createProxyFunction(call, M);
+                if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
+                  NF->addFnAttr("no_caller_saved_registers");
+                  LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+                }
               }
             }
           }
