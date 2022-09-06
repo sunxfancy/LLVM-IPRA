@@ -26,7 +26,7 @@ using namespace llvm;
 
 #define DEBUG_TYPE "fdo-ipra"
 
-static cl::opt<bool> OnHotEntryAndHotCallGraph("fdoipra-both-hot", cl::init(false), cl::Hidden);
+static cl::opt<bool> OnHotEntryAndHotCallGraph("fdoipra-both-hot", cl::init(true), cl::Hidden);
 static cl::opt<bool> ColdCallsiteColdCallee("fdoipra-cc", cl::init(true), cl::Hidden);
 static cl::opt<bool> ColdCallsiteHotCallee ("fdoipra-ch", cl::init(false), cl::Hidden);
 static cl::opt<bool> HotCallsiteColdCallee ("fdoipra-hc", cl::init(false), cl::Hidden);
