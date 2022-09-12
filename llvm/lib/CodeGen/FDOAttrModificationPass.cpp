@@ -137,7 +137,6 @@ char FDOAttrModification2::ID = 0;
 
 static Function* completeFunction(Function* F, CallInst* Call) {
   if (!F->isDeclaration()) return F;
-  F->setLinkage(GlobalValue::LinkageTypes::WeakAnyLinkage);
   BasicBlock* BB = BasicBlock::Create(F->getContext(), "", F);
   IRBuilder<> Builder(BB);
   SmallVector<Value*, 12> arguments;
@@ -154,10 +153,11 @@ static Function* completeFunction(Function* F, CallInst* Call) {
 
 static Function* createProxyFunction(CallInst* Call, Module& M) {
   if (Call->isIndirectCall()) {
-    Function* NF = Function::Create(Call->getFunctionType(), GlobalValue::LinkageTypes::WeakAnyLinkage, "HC_NCSRProxy", M);
+    Function* NF = Function::Create(Call->getFunctionType(), GlobalValue::LinkageTypes::InternalLinkage, "", M);
     NF->addFnAttr(Attribute::AttrKind::NoInline);
-    Call->setCalledFunction(NF);
-    return completeFunction(NF, Call);
+    auto FF = completeFunction(NF, Call);
+    Call->setCalledFunction(FF);
+    return FF;
   } else {
     Function* F = Call->getCalledFunction();
     if (F == nullptr) {
@@ -171,8 +171,12 @@ static Function* createProxyFunction(CallInst* Call, Module& M) {
     auto NF = M.getOrInsertFunction(new_name, F->getFunctionType(), F->getAttributes());
     LLVM_DEBUG(dbgs() << *(NF.getFunctionType()) << "\n";);
     LLVM_DEBUG(dbgs() << *(NF.getCallee()) << "\n";);
-    Call->setCalledFunction(NF);
-    return completeFunction(dyn_cast<Function>(NF.getCallee()), Call);
+    
+    dyn_cast<Function>(NF.getCallee())->addFnAttr(Attribute::AttrKind::NoInline);
+    dyn_cast<Function>(NF.getCallee())->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+    auto FF = completeFunction(dyn_cast<Function>(NF.getCallee()), Call);
+    Call->setCalledFunction(FF);
+    return FF;
   }
 }
 
