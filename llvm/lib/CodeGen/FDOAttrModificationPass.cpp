@@ -1,4 +1,5 @@
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/LazyBlockFrequencyInfo.h"
@@ -21,7 +22,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Analysis/CallGraph.h"
-
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include <cstddef>
 using namespace llvm;
 
 #define DEBUG_TYPE "fdo-ipra"
@@ -139,11 +141,16 @@ static Function* completeFunction(Function* F, CallInst* Call) {
   if (!F->isDeclaration()) return F;
   BasicBlock* BB = BasicBlock::Create(F->getContext(), "", F);
   IRBuilder<> Builder(BB);
+
+  int indirect_offset = Call->isIndirectCall() ? 1 : 0;
   SmallVector<Value*, 12> arguments;
-  for (int i = 0; i < F->arg_size(); ++i) {
-    arguments.push_back(F->getArg(i));
+  for (int i = 0; i < Call->getFunctionType()->getFunctionNumParams(); ++i) {
+    arguments.push_back(F->getArg(i+indirect_offset));
   }
-  auto* call = Builder.CreateCall(Call->getFunctionType(), Call->getCalledOperand(), arguments);
+
+  auto* callee = Call->isIndirectCall() ? F->getArg(0) : Call->getCalledOperand();
+
+  auto* call = Builder.CreateCall(Call->getFunctionType(), callee, arguments);
   if (F->getReturnType()->isVoidTy())
     Builder.CreateRetVoid();
   else
@@ -151,33 +158,51 @@ static Function* completeFunction(Function* F, CallInst* Call) {
   return F;
 }
 
-static Function* createProxyFunction(CallInst* Call, Module& M) {
+
+static Function* createAndReplaceUsingProxyFunction(CallInst* Call, Module& M) {
   if (Call->isIndirectCall()) {
-    Function* NF = Function::Create(Call->getFunctionType(), GlobalValue::LinkageTypes::InternalLinkage, "", M);
+    auto* FT = Call->getFunctionType();
+    auto v = FT->params().vec();
+    v.insert(v.begin(), Call->getCalledOperand()->getType());
+    
+    auto* NFT = FunctionType::get(FT->getReturnType(), v, false);
+    auto* NF = Function::Create(NFT, GlobalValue::LinkageTypes::InternalLinkage, "", M);
     NF->addFnAttr(Attribute::AttrKind::NoInline);
     auto FF = completeFunction(NF, Call);
-    Call->setCalledFunction(FF);
-    return FF;
-  } else {
-    Function* F = Call->getCalledFunction();
-    if (F == nullptr) {
-      LLVM_DEBUG(dbgs() << "createProxyFunction Failed: " << *Call << "\n");
-      return nullptr;
-    }
-    std::string name = F->getName().str();
-    std::string new_name = name + "$NCSRProxy";
-    LLVM_DEBUG(dbgs() << "createProxyFunction: " << new_name << "\n");
-    LLVM_DEBUG(dbgs() << "createProxyFunction: " << *F << "\n");
-    auto NF = M.getOrInsertFunction(new_name, F->getFunctionType(), F->getAttributes());
-    LLVM_DEBUG(dbgs() << *(NF.getFunctionType()) << "\n";);
-    LLVM_DEBUG(dbgs() << *(NF.getCallee()) << "\n";);
     
-    dyn_cast<Function>(NF.getCallee())->addFnAttr(Attribute::AttrKind::NoInline);
-    dyn_cast<Function>(NF.getCallee())->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-    auto FF = completeFunction(dyn_cast<Function>(NF.getCallee()), Call);
-    Call->setCalledFunction(FF);
-    return FF;
+    SmallVector<Value*, 12> args;
+    args.push_back(Call->getCalledOperand());
+    for (auto k = Call->arg_begin(); k != Call->arg_end(); ++k) {
+      args.push_back(k->get());
+    }
+
+    llvm::ReplaceInstWithInst(Call, CallInst::Create(NFT, NF, args));
+    return NF;
+  } else {
+    LLVM_DEBUG(dbgs() << "createAndReplaceUsingProxyFunction Failed: " << *Call << "\n");
+    return nullptr;
   }
+}
+
+static Function* createProxyFunction(CallInst* Call, Module& M) {
+  Function* F = Call->getCalledFunction();
+  if (F == nullptr) {
+    LLVM_DEBUG(dbgs() << "createProxyFunction Failed: " << *Call << "\n");
+    return nullptr;
+  }
+  std::string name = F->getName().str();
+  std::string new_name = name + "$NCSRProxy";
+  LLVM_DEBUG(dbgs() << "createProxyFunction: " << new_name << "\n");
+  LLVM_DEBUG(dbgs() << "createProxyFunction: " << *F << "\n");
+  auto NF = M.getOrInsertFunction(new_name, F->getFunctionType(), F->getAttributes());
+  LLVM_DEBUG(dbgs() << *(NF.getFunctionType()) << "\n";);
+  LLVM_DEBUG(dbgs() << *(NF.getCallee()) << "\n";);
+  
+  dyn_cast<Function>(NF.getCallee())->addFnAttr(Attribute::AttrKind::NoInline);
+  dyn_cast<Function>(NF.getCallee())->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+  auto FF = completeFunction(dyn_cast<Function>(NF.getCallee()), Call);
+  Call->setCalledFunction(FF);
+  return FF;
 }
 
 
@@ -204,53 +229,63 @@ bool FDOAttrModification2::runOnModule(Module &M) {
       
       LLVM_DEBUG(dbgs() << "hot caller: " << F.getName() << "\n");
 
+
+      SmallVector<CallInst*, 64> callsites;
       for (auto &BB : F)
         for (auto &MI : BB)
           if (MI.getOpcode() == Instruction::Call) {
             CallInst *call = dyn_cast<CallInst>(&MI);
-            
-            if (ColdCallsiteColdCallee) {
-              Function *callee = call->getCalledFunction();
-              if (callee && !callee->isDeclaration()) {
+            callsites.push_back(call);  
+          }
 
-                // if callee is cold on entry
-                if (PSI->isFunctionEntryCold(callee)) {
-                  LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
-                                    << " to cold " << callee->getName() << "\n");
-                  if (callee->hasFnAttribute("no_caller_saved_registers") == false) {
-                    callee->addFnAttr("no_caller_saved_registers");
-                    LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-                  }
-                }
-              }
-            }
+      for (CallInst* call : callsites) {
+        if (ColdCallsiteColdCallee) {
+          Function *callee = call->getCalledFunction();
+          if (callee && !callee->isDeclaration()) {
 
-            if (ColdCallsiteHotCallee) {
-              Function *callee = call->getCalledFunction();
-              // if callsit is cold and callee is not indirect call and here we create another proxy function call
-              if (callee && PSI->isColdCallSite(*call, &BFI) && PSI->isFunctionEntryHot(callee)) {
-                Function* NF = createProxyFunction(call, M);
-                if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-                  NF->addFnAttr("no_caller_saved_registers");
-                  LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-                }
+            // if callee is cold on entry
+            if (PSI->isFunctionEntryCold(callee)) {
+              LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
+                                << " to cold " << callee->getName() << "\n");
+              if (callee->hasFnAttribute("no_caller_saved_registers") == false) {
+                callee->addFnAttr("no_caller_saved_registers");
+                LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
               }
-            }
-
-            if (HotCallsiteColdCallee) {
-              if (call->isIndirectCall()) {
-                LLVM_DEBUG(dbgs() << "indirect call detected!\n" << *call << "\n");
-                LLVM_DEBUG(dbgs() << "isColdCallsite: " << PSI->isColdCallSite(*call, &BFI) << "\n");
-              }
-              if (call->isIndirectCall() && PSI->isColdCallSite(*call, &BFI)) {
-                Function* NF = createProxyFunction(call, M);
-                if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-                  NF->addFnAttr("no_caller_saved_registers");
-                  LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-                }
-              }
+              continue;
             }
           }
+        }
+
+        if (ColdCallsiteHotCallee) {
+          Function *callee = call->getCalledFunction();
+          // if callsit is cold and callee is not indirect call and here we create another proxy function call
+          if (callee && PSI->isColdCallSite(*call, &BFI) && PSI->isFunctionEntryHot(callee)) {
+            Function* NF = createProxyFunction(call, M);
+            if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
+              NF->addFnAttr("no_caller_saved_registers");
+              LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+              continue;
+            }
+          }
+        }
+
+        if (HotCallsiteColdCallee) {
+          if (call->isIndirectCall()) {
+            LLVM_DEBUG(dbgs() << "indirect call detected!\n" << *call << "\n");
+            LLVM_DEBUG(dbgs() << "isColdCallsite: " << PSI->isColdCallSite(*call, &BFI) << "\n");
+          }
+          if (call->isIndirectCall() && PSI->isColdCallSite(*call, &BFI)) {
+            Function* NF = createAndReplaceUsingProxyFunction(call, M);
+            if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
+              NF->addFnAttr("no_caller_saved_registers");
+              LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+              // NF->dump();
+              // F.dump();
+              continue;
+            }
+          }
+        }
+      }
     }
   }
 
