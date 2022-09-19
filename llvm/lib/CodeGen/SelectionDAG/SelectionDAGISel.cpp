@@ -671,6 +671,8 @@ void SelectionDAGISel::SelectBasicBlock(BasicBlock::const_iterator Begin,
   // nodes for this block.
   for (BasicBlock::const_iterator I = Begin; I != End && !SDB->HasTailCall; ++I) {
     if (!ElidedArgCopyInstrs.count(&*I))
+      if (I->getOpcode() == Instruction::Ret && I->getFunction()->getName() == "_Z16yy_create_bufferP8_IO_FILEi")  
+        LLVM_DEBUG(errs() << "SelectionDAGISel::SelectBasicBlock meet a return instruction\n");
       SDB->visit(*I);
   }
 

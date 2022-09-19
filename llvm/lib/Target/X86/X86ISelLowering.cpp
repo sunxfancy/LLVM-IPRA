@@ -3116,7 +3116,7 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
       CallConv == CallingConv::X86_RegCall ||
       MF.getFunction().hasFnAttribute("no_caller_saved_registers");
 
-  LLVM_DEBUG(errs() << "ShouldDisableCalleeSavedRegister = " << ShouldDisableCalleeSavedRegister << "\n");
+  LLVM_DEBUG(errs() << MF.getName() << " ShouldDisableCalleeSavedRegister = " << ShouldDisableCalleeSavedRegister << "\n");
 
   if (CallConv == CallingConv::X86_INTR && !Outs.empty())
     report_fatal_error("X86 interrupts may not return any value");
@@ -3124,7 +3124,7 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, MF, RVLocs, *DAG.getContext());
   CCInfo.AnalyzeReturn(Outs, RetCC_X86);
-
+  LLVM_DEBUG(errs() << "RVLocs = " << RVLocs.size() << "\n");
   SmallVector<std::pair<Register, SDValue>, 4> RetVals;
   for (unsigned I = 0, OutsIndex = 0, E = RVLocs.size(); I != E;
        ++I, ++OutsIndex) {
@@ -3134,7 +3134,8 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     // Add the register to the CalleeSaveDisableRegs list.
     if (ShouldDisableCalleeSavedRegister) {
       MF.getRegInfo().disableCalleeSavedRegister(VA.getLocReg());
-      LLVM_DEBUG(errs() << "VA = " << VA.getLocReg() << "\n");
+      const X86RegisterInfo *TRI = Subtarget.getRegisterInfo();
+      LLVM_DEBUG(errs() << "VA = " << printReg(VA.getLocReg(), TRI) << "\n");
     }
 
     SDValue ValToCopy = OutVals[OutsIndex];
