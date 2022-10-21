@@ -391,7 +391,8 @@ extern cl::opt<bool> EnableFSDiscriminator;
 extern Pass* createFDOAttrModification2Pass();
 
 static cl::opt<bool> FDO_IPRA("fdo-ipra", cl::Hidden, cl::init(false), cl::desc("Enable FDO-based IPRA"));
-
+extern cl::opt<std::string> MapOutput;
+extern MachineFunctionPass *createMapBBIndexPass();
 
 class PassConfigImpl {
 public:
@@ -1314,6 +1315,11 @@ void TargetPassConfig::addMachinePasses() {
 
   // Add passes that directly emit MI after all other MI passes.
   addPreEmitPass2();
+
+    // print bbidx map
+  if (!MapOutput.empty())
+    addPass(createMapBBIndexPass());
+
 
   AddingMachinePasses = false;
 }
