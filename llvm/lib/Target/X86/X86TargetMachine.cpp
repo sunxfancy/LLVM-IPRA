@@ -67,7 +67,6 @@ static cl::opt<bool>
                      cl::desc("Enable the tile register allocation pass"),
                      cl::init(true), cl::Hidden);
 
-static cl::opt<bool> EnableCPPP("count-push-pop", cl::Hidden, cl::init(false), cl::desc("Enable counting push and pop"));
 
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
   // Register the target.
