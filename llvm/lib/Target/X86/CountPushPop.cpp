@@ -9,6 +9,7 @@
 #include "llvm/Support/CommandLine.h"
 
 #include <string>
+#include <fstream>
 
 #define DEBUG_TYPE "count-push-pop"
 
@@ -16,9 +17,23 @@ llvm::cl::opt<std::string>
     EnableCPPP("count-push-pop", llvm::cl::Hidden, llvm::cl::init("off"),
       llvm::cl::ValueOptional, llvm::cl::desc("Enable counting push and pop"));
 
+
+// This is a txt file that contains the function name, then a pair of basic block id - count
+llvm::cl::opt<std::string>
+  UsePerfdata("use-perfdata", llvm::cl::Hidden, llvm::cl::init(""),
+           llvm::cl::ValueOptional, llvm::cl::desc("Enable perfdata push pop counting"));
+
+
 namespace llvm {
 
 static std::mutex g_file_mutex;
+
+struct Counts {
+  uint64_t Push = 0;
+  uint64_t Pop = 0;
+  uint64_t StaticPush = 0;
+  uint64_t StaticPop = 0;
+};
 
 class CountPushPop : public MachineFunctionPass {
 public:
@@ -32,22 +47,31 @@ public:
                     ? &getAnalysis<LazyMachineBlockFrequencyInfoPass>().getBFI()
                     : nullptr;
     for (auto &MBB : MF) {
+      auto p = MBFI->getBlockProfileCount(&MBB);
       for (auto &MI : MBB) {
-        // MI.getFlag(MachineInstr::FrameSetup) &&
         if (MI.getOpcode() == X86::PUSH64r) {
-          if (MBFI) {
-            auto p = MBFI->getBlockProfileCount(&MBB);
-            if (p)
-              PushCount += p.value();
-          }
-          StaticPushCount += 1;
+          if (MBFI && p) pgo.Push += p.value();
+          pgo.StaticPush += 1;
         } else if (MI.getOpcode() == X86::POP64r) {
-          if (MBFI) {
-            auto p = MBFI->getBlockProfileCount(&MBB);
-            if (p)
-              PopCount += p.value();
-          }
-          StaticPopCount += 1;
+          if (MBFI && p) pgo.Pop += p.value();
+          pgo.StaticPop += 1;
+        }
+      }
+    }
+
+    if (UsePerfdata != "") {
+      if (PerfData.count(MF.getName().str())) {
+        auto& m = PerfData[MF.getName().str()];
+        for (auto &MBB : MF) {
+          auto p  = m.find(MBB.getNumber());
+          if (p != m.end())
+            for (auto &MI : MBB) {
+              if (MI.getOpcode() == X86::PUSH64r) {
+                    perf.Push += p->second;
+              } else if (MI.getOpcode() == X86::POP64r) {
+                    perf.Pop += p->second;
+              }
+            }
         }
       }
     }
@@ -55,16 +79,32 @@ public:
     return false;
   }
 
-  uint64_t PushCount;
-  uint64_t PopCount;
-  uint64_t StaticPushCount;
-  uint64_t StaticPopCount;
+  Counts pgo, perf;
+
+  std::map<std::string, std::map<uint64_t, uint64_t>> PerfData;
 
   bool doInitialization(Module &M) override {
-    PushCount = 0;
-    PopCount = 0;
-    StaticPushCount = 0;
-    StaticPopCount = 0;
+
+    if (UsePerfdata != "") {
+      std::ifstream infile(UsePerfdata);
+      uint64_t count;
+      infile >> count;
+      for (uint64_t i = 0; i < count; i++) {
+        std::string func_name;
+        infile >> func_name;
+        uint64_t bb_count;
+        infile >> bb_count;
+        PerfData[func_name] = std::map<uint64_t, uint64_t>();
+        for (uint64_t j = 0; j < bb_count; j++) {
+          uint64_t bb_id;
+          uint64_t bb_count;
+          infile >> bb_id;
+          infile >> bb_count;
+          PerfData[func_name][bb_id] = bb_count;
+        }
+      }
+    }
+
     return false;
   }
 
@@ -75,11 +115,16 @@ public:
       path = "/tmp/count-push-pop.txt";
     FILE *pOut = fopen(path.c_str(), "a");
     if (pOut) {
-      fprintf(pOut, "counting in %s\n", M.getName().str().c_str());
-      fprintf(pOut, "dynamic push count: %zu\n", PushCount);
-      fprintf(pOut, "dynamic pop  count: %zu\n", PopCount);
-      fprintf(pOut, "static  push count: %zu\n", StaticPushCount);
-      fprintf(pOut, "static  pop  count: %zu\n", StaticPopCount);
+      fprintf(pOut, "Using PGO profile counting in %s\n", M.getName().str().c_str());
+      fprintf(pOut, "dynamic push count: %zu\n", pgo.Push);
+      fprintf(pOut, "dynamic pop  count: %zu\n", pgo.Pop);
+      fprintf(pOut, "static  push count: %zu\n", pgo.StaticPush);
+      fprintf(pOut, "static  pop  count: %zu\n", pgo.StaticPop);
+      if (UsePerfdata != "") {
+        fprintf(pOut, "Using perfdata counting in perfdata %s\n", UsePerfdata); 
+        fprintf(pOut, "perf push count: %zu\n", perf.Push);
+        fprintf(pOut, "perf pop  count: %zu\n", perf.Pop);
+      }
       fclose(pOut);
     }
     return false;

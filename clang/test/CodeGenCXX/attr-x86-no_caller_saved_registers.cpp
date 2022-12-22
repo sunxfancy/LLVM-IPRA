@@ -2,7 +2,7 @@
 // RUN: %clang_cc1 -no-opaque-pointers -triple x86_64-pc-win32 %s -emit-llvm -o - | FileCheck %s
 
 // CHECK: foo{{[^#]*}}#[[ATTRS:[0-9]+]]
-__attribute__((no_caller_saved_registers)) void foo() {}
+__attribute__(()) void foo() {}
 namespace S {
 // CHECK: bar{{[^#]*}}#[[ATTRS]]
 __attribute__((no_caller_saved_registers)) void bar(int *a) { foo(); }
