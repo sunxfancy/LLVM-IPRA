@@ -121,7 +121,7 @@ public:
       fprintf(pOut, "static  push count: %zu\n", pgo.StaticPush);
       fprintf(pOut, "static  pop  count: %zu\n", pgo.StaticPop);
       if (UsePerfdata != "") {
-        fprintf(pOut, "Using perfdata counting in perfdata %s\n", UsePerfdata); 
+        fprintf(pOut, "Using perfdata counting in perfdata %s\n", UsePerfdata.c_str()); 
         fprintf(pOut, "perf push count: %zu\n", perf.Push);
         fprintf(pOut, "perf pop  count: %zu\n", perf.Pop);
       }
