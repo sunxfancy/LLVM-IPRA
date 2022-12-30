@@ -58,6 +58,9 @@ using namespace llvm;
 extern MachineFunctionPass* createCountPushPopPass();
 extern cl::opt<std::string> EnableCPPP;
 
+extern MachineFunctionPass* createInstrumentRegProfilerPassPass();
+extern cl::opt<std::string> EnablePPP, EnableSBP;
+
 static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
                                cl::desc("Enable the machine combiner pass"),
                                cl::init(true), cl::Hidden);
@@ -616,6 +619,8 @@ void X86PassConfig::addPreEmitPass2() {
   // Add count push pop pass for study the register savings
   if (EnableCPPP != "off") addPass(createCountPushPopPass());
 
+  // Add instrument register profiler pass
+  if (EnablePPP != "" || EnableSBP != "") addPass(createInstrumentRegProfilerPassPass());
 
   // On Darwin platforms, BLR_RVMARKER pseudo instructions are lowered to
   // bundles.
