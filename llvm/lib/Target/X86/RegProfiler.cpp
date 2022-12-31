@@ -8,20 +8,19 @@
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-
+#include "llvm/IR/GlobalValue.h"
 #include <string>
 #include <fstream>
 
 #define DEBUG_TYPE "reg-profiler"
 
-llvm::cl::opt<std::string>
-  EnablePPP("EnablePushPopProfile", llvm::cl::Hidden, llvm::cl::init(""),
+llvm::cl::opt<bool>
+  EnablePPP("EnablePushPopProfile", llvm::cl::Hidden, llvm::cl::init(false),
             llvm::cl::ValueOptional, llvm::cl::desc("Enable counting push and pop"));
 
-llvm::cl::opt<std::string>
-  EnableSBP("EnableSpillBytesProfile", llvm::cl::Hidden, llvm::cl::init(""),
+llvm::cl::opt<bool>
+  EnableSBP("EnableSpillBytesProfile", llvm::cl::Hidden, llvm::cl::init(false),
             llvm::cl::ValueOptional, llvm::cl::desc("Enable counting spill bytes"));
-
 
 namespace llvm {
 
@@ -57,11 +56,14 @@ public:
     for (auto &MBB : MF) {
       unsigned count[4] = {0, 0, 0, 0};
       for (auto &MI : MBB) {
-        if (MI.getOpcode() == X86::PUSH64r) {
-          count[push]++;
-        } else if (MI.getOpcode() == X86::POP64r) {
-          count[pop]++;
-        } else {
+        if (EnablePPP) {
+          if (MI.getOpcode() == X86::PUSH64r) {
+            count[push]++;
+          } else if (MI.getOpcode() == X86::POP64r) {
+            count[pop]++;
+          } 
+        } 
+        if (EnableSBP) {
           Optional<unsigned> Size;
           if (Size = MI.getSpillSize(&TII)) {
             LLVM_DEBUG(dbgs() << "SpillInst: ";  MI.print(dbgs()));
@@ -75,24 +77,17 @@ public:
       if (count[push] == 0 && count[pop] == 0 && count[spill] == 0 && count[reload] == 0) continue;
       
       auto dbgLoc = MBB.begin()->getDebugLoc();
-      // spill rax
-      auto it = MBB.insert(MBB.begin(), BuildMI(MF, dbgLoc, TII.get(X86::MOV64mr))
-        .addReg(X86::RIP).addImm(1).addReg(X86::NoRegister).addGlobalAddress(SpillReg).addReg(X86::NoRegister).addReg(X86::RAX));
-
+      auto it = MBB.begin();
       // here add the profiling code for profiling
-
       for (int i = 0; i < 4; ++i) {
         if (count[i] == 0) continue;
-        it = MBB.insertAfter(it, BuildMI(MF, dbgLoc, TII.get(X86::MOV64rm), X86::RAX)
-          .addReg(X86::RIP).addImm(1).addReg(X86::NoRegister).addGlobalAddress(vars[i]).addReg(X86::NoRegister));
-        it = MBB.insertAfter(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64ri32), X86::RAX)
-          .addReg(X86::RAX).addImm(count[i]));
-        it = MBB.insertAfter(it, BuildMI(MF, dbgLoc, TII.get(X86::MOV64mr))
-          .addReg(X86::RIP).addImm(1).addReg(X86::NoRegister).addGlobalAddress(vars[i]).addReg(X86::NoRegister).addReg(X86::RAX));
+        if (count[i] < 128)
+          MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64mi8))
+            .addReg(X86::NoRegister).addImm(1).addReg(X86::NoRegister).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addImm(count[i]));
+        else
+          MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64mi32))
+            .addReg(X86::NoRegister).addImm(1).addReg(X86::NoRegister).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addImm(count[i]));
       }
-      // reload rax
-      it = MBB.insertAfter(it, BuildMI(MF, dbgLoc, TII.get(X86::MOV64rm), X86::RAX)
-        .addReg(X86::RIP).addImm(1).addReg(X86::NoRegister).addGlobalAddress(SpillReg).addReg(X86::NoRegister));
     }
     LLVM_DEBUG(MF.print(dbgs()));
     return true;
@@ -109,13 +104,12 @@ public:
 
   // bool doInitialization(Module &M) override {
   //   auto Ty = Type::getInt64Ty(M.getContext());
-  //   auto createGlobal = [&M, &Ty](StringRef name) {
-  //     return dyn_cast<GlobalValue>(M.getOrInsertGlobal(name, Ty,[&] {
+  //   auto createGlobal = [&M, Ty](StringRef name) {
+  //     return dyn_cast<GlobalValue>(M.getOrInsertGlobal(name, Ty, [=] {
   //       return new GlobalVariable(Ty, false, GlobalVariable::ExternalLinkage,
-  //                               nullptr, name);
+  //                               nullptr, name, GlobalValue::ThreadLocalMode::GeneralDynamicTLSModel);
   //     }));
   //   };
-  //   SpillReg = createGlobal("__LLVM_IRPP_SpillReg");
   //   Spill = createGlobal("__LLVM_IRPP_Spill");
   //   Reload = createGlobal("__LLVM_IRPP_Reload");
   //   Push = createGlobal("__LLVM_IRPP_Push");
@@ -124,7 +118,6 @@ public:
   // }
 
   bool doFinalization(Module &M) override {
-    
     return false;
   }
 };

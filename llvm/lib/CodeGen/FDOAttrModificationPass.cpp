@@ -25,6 +25,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -47,6 +48,12 @@ static cl::opt<bool> HotCallsiteColdCallee("fdoipra-hc", cl::init(false),
                                            cl::Hidden);
 static cl::opt<bool> HotCallsiteHotCallee("fdoipra-hh", cl::init(false),
                                           cl::Hidden);
+
+static cl::opt<bool> UseCalleeReg("fdoipra-use-callee-reg", cl::init(true),
+                                  cl::Hidden);
+
+static cl::opt<bool> UseCallerReg("fdoipra-use-caller-reg", cl::init(false),
+                                  cl::Hidden);
 
 static cl::opt<std::string> RegProfilePath("fdoipra-profile", cl::init(""),
                                            cl::Hidden);
@@ -495,6 +502,9 @@ class FDOAttrModification2 : public ModulePass, public FDOQuery {
     AU.setPreservesAll();
   }
 
+  void CalleeToCaller(llvm::Function &F);
+  void CallerToCallee(llvm::Function &F);
+
   bool runOnModule(Module &M) override;
 
   void dumpPSI(Module &M);
@@ -505,7 +515,121 @@ class FDOAttrModification2 : public ModulePass, public FDOQuery {
 
 char FDOAttrModification2::ID = 0;
 
+static void findAllCallsite(llvm::Function &F, SmallVector<CallInst*, 64>& callsites) {
+  for (auto &BB : F)
+    for (auto &MI : BB)
+      if (MI.getOpcode() == Instruction::Call) {
+        CallInst *call = dyn_cast<CallInst>(&MI);
+        callsites.push_back(call);
+      }
+}
 
+void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
+  // if this is a not hot function
+  if (OnHotEntryAndHotCallGraph) {
+    if (!isFunctionEntryHot(&F) && !isFunctionHotInCallGraph(&F)) return;
+  } else {
+    if (!isFunctionEntryHot(&F)) return;
+  }
+
+  LLVM_DEBUG(dbgs() << "caller has profile: " << F.getName() << "\n");
+  LLVM_DEBUG(dbgs() << "hot threshod = " << PSI->getHotCountThreshold()
+                    << "\n");
+  LLVM_DEBUG(dbgs() << "func addr: " << (&F.getFunction())
+                    << "  func count: "
+                    << F.getFunction().getEntryCount()->getCount() << "\n");
+
+  LLVM_DEBUG(dbgs() << "hot caller: " << F.getName() << "\n");
+
+  SmallVector<CallInst*, 64> callsites;
+  findAllCallsite(F, callsites);
+
+  for (CallInst *call : callsites) {
+    if (ColdCallsiteColdCallee) {
+      Function *callee = call->getCalledFunction();
+      if (callee && !callee->isDeclaration()) {
+        // if callee is cold on entry
+        if (isFunctionEntryCold(callee)) {
+          LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
+                            << " to cold " << callee->getName() << "\n");
+          if (callee->hasFnAttribute("no_caller_saved_registers") == false) {
+            callee->addFnAttr("no_caller_saved_registers");
+            LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+          }
+          return;
+        }
+      }
+    }
+
+    if (ColdCallsiteHotCallee) {
+      Function *callee = call->getCalledFunction();
+      // if callsit is cold and callee is not indirect call and here we
+      // create another proxy function call
+      if (callee && isColdCallSite(*call) && isFunctionEntryHot(callee)) {
+        Function *NF = createProxyFunction(call, *F.getParent());
+        if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
+          NF->addFnAttr("no_caller_saved_registers");
+          LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+          return;
+        }
+      }
+    }
+
+    if (HotCallsiteColdCallee) {
+      if (call->isIndirectCall()) {
+        LLVM_DEBUG(dbgs() << "indirect call detected!\n" << *call << "\n");
+        LLVM_DEBUG(dbgs() << "isColdCallsite: "
+                          << isColdCallSite(*call) << "\n");
+      }
+      if (call->isIndirectCall() && isColdCallSite(*call)) {
+        Function *NF = createAndReplaceUsingProxyFunction(call, *F.getParent());
+        if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
+          NF->addFnAttr("no_caller_saved_registers");
+          LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+          return;
+        }
+      }
+    }
+  }
+}
+
+
+
+
+void FDOAttrModification2::CallerToCallee(llvm::Function &F) {
+  // if this is a not cold function
+  if (OnHotEntryAndHotCallGraph) {
+    if (isFunctionEntryHot(&F) || isFunctionHotInCallGraph(&F)) return;
+  } else {
+    if (isFunctionEntryHot(&F)) return;
+  }
+
+  SmallVector<CallInst*, 64> callsites;
+  findAllCallsite(F, callsites);
+
+  for (CallInst *call : callsites) {
+    if (ColdCallsiteHotCallee) {
+      Function *callee = call->getCalledFunction();
+      if (callee && !callee->isDeclaration()) {
+        // if callee is hot on entry
+        if (isFunctionEntryHot(callee)) {
+          ValueToValueMapTy VMap;
+          Function* clone = CloneFunction(callee, VMap);
+          if (clone) {
+            LLVM_DEBUG(dbgs() << "Adding attributes from cold " << F.getName()
+                              << " to hot " << clone->getName() << "\n");
+            if (clone->hasFnAttribute("no_callee_saved_registers") == false) {
+              clone->addFnAttr("no_callee_saved_registers");
+              LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
+            }
+            call->setCalledFunction(clone);
+            return;
+          }
+        }
+      }
+    }
+  }
+}
 
 bool FDOAttrModification2::runOnModule(Module &M) {
   initProfile();
@@ -516,78 +640,8 @@ bool FDOAttrModification2::runOnModule(Module &M) {
     if (F.isDeclaration()) continue;
     initBlockFreqInfo(&F);
 
-    // if this is a not hot function
-    if (OnHotEntryAndHotCallGraph) {
-      if (!isFunctionEntryHot(&F) && !isFunctionHotInCallGraph(&F)) continue;
-    } else {
-      if (!isFunctionEntryHot(&F)) continue;
-    }
-
-    LLVM_DEBUG(dbgs() << "caller has profile: " << F.getName() << "\n");
-    LLVM_DEBUG(dbgs() << "hot threshod = " << PSI->getHotCountThreshold()
-                      << "\n");
-    LLVM_DEBUG(dbgs() << "func addr: " << (&F.getFunction())
-                      << "  func count: "
-                      << F.getFunction().getEntryCount()->getCount() << "\n");
-
-    LLVM_DEBUG(dbgs() << "hot caller: " << F.getName() << "\n");
-
-    SmallVector<CallInst *, 64> callsites;
-    for (auto &BB : F)
-      for (auto &MI : BB)
-        if (MI.getOpcode() == Instruction::Call) {
-          CallInst *call = dyn_cast<CallInst>(&MI);
-          callsites.push_back(call);
-        }
-
-    for (CallInst *call : callsites) {
-      if (ColdCallsiteColdCallee) {
-        Function *callee = call->getCalledFunction();
-        if (callee && !callee->isDeclaration()) {
-          // if callee is cold on entry
-          if (isFunctionEntryCold(callee)) {
-            LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
-                              << " to cold " << callee->getName() << "\n");
-            if (callee->hasFnAttribute("no_caller_saved_registers") ==
-                false) {
-              callee->addFnAttr("no_caller_saved_registers");
-              LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-            }
-            continue;
-          }
-        }
-      }
-
-      if (ColdCallsiteHotCallee) {
-        Function *callee = call->getCalledFunction();
-        // if callsit is cold and callee is not indirect call and here we
-        // create another proxy function call
-        if (callee && isColdCallSite(*call) && isFunctionEntryHot(callee)) {
-          Function *NF = createProxyFunction(call, M);
-          if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-            NF->addFnAttr("no_caller_saved_registers");
-            LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-            continue;
-          }
-        }
-      }
-
-      if (HotCallsiteColdCallee) {
-        if (call->isIndirectCall()) {
-          LLVM_DEBUG(dbgs() << "indirect call detected!\n" << *call << "\n");
-          LLVM_DEBUG(dbgs() << "isColdCallsite: "
-                            << isColdCallSite(*call) << "\n");
-        }
-        if (call->isIndirectCall() && isColdCallSite(*call)) {
-          Function *NF = createAndReplaceUsingProxyFunction(call, M);
-          if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-            NF->addFnAttr("no_caller_saved_registers");
-            LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-            continue;
-          }
-        }
-      }
-    }
+    if (UseCalleeReg) CalleeToCaller(F);
+    if (UseCallerReg) CallerToCallee(F);
   }
 
   if (OutputPSI != "off") dumpPSI(M);
