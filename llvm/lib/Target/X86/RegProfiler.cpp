@@ -78,6 +78,8 @@ public:
       
       auto dbgLoc = MBB.begin()->getDebugLoc();
       auto it = MBB.begin();
+
+      MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::PUSHF64)));
       // here add the profiling code for profiling
       for (int i = 0; i < 4; ++i) {
         if (count[i] == 0) continue;
@@ -88,6 +90,7 @@ public:
           MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64mi32))
             .addReg(X86::NoRegister).addImm(1).addReg(X86::NoRegister).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addImm(count[i]));
       }
+      MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::POPF64)));
     }
     LLVM_DEBUG(MF.print(dbgs()));
     return true;
