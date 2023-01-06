@@ -79,18 +79,32 @@ public:
       auto dbgLoc = MBB.begin()->getDebugLoc();
       auto it = MBB.begin();
 
-      MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::PUSHF64)));
+      // spill rax
+      MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::MOV64mr))
+        .addReg(0).addImm(1).addReg(0).addGlobalAddress(SpillReg, 0, X86II::MO_TPOFF).addReg(X86::FS).addReg(X86::RAX));
+
       // here add the profiling code for profiling
       for (int i = 0; i < 4; ++i) {
         if (count[i] == 0) continue;
-        if (count[i] < 128)
-          MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64mi8))
-            .addReg(X86::NoRegister).addImm(1).addReg(X86::NoRegister).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addImm(count[i]));
-        else
-          MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64mi32))
-            .addReg(X86::NoRegister).addImm(1).addReg(X86::NoRegister).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addImm(count[i]));
+
+        MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::MOV64rm), X86::RAX)
+          .addReg(0).addImm(1).addReg(0).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS));
+        MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::LEA64r), X86::RAX)
+          .addReg(/*Base*/ X86::RAX).addImm(/*Scale*/ 1).addReg(/*Index*/ 0).addImm(/*Disp*/ count[i]).addReg(/*Segment*/ 0));
+        MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::MOV64mr))
+          .addReg(0).addImm(1).addReg(0).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addReg(X86::RAX));
+
+        // if (count[i] < 128)
+        //   MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64mi8))
+        //     .addReg(0).addImm(1).addReg(0).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addImm(count[i]));
+        // else
+        //   MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::ADD64mi32))
+        //     .addReg(0).addImm(1).addReg(0).addGlobalAddress(vars[i], 0, X86II::MO_TPOFF).addReg(X86::FS).addImm(count[i]));
       }
-      MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::POPF64)));
+
+      // reload rax
+      MBB.insert(it, BuildMI(MF, dbgLoc, TII.get(X86::MOV64rm), X86::RAX)
+        .addReg(0).addImm(1).addReg(0).addGlobalAddress(SpillReg, 0, X86II::MO_TPOFF).addReg(X86::FS));
     }
     LLVM_DEBUG(MF.print(dbgs()));
     return true;
