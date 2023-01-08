@@ -329,9 +329,8 @@ static Function *createAndReplaceUsingProxyFunction(CallInst *Call, Module &M) {
     auto v = FT->params().vec();
     v.insert(v.begin(), Call->getCalledOperand()->getType());
 
-    auto *NFT = FunctionType::get(FT->getReturnType(), v, false);
-    auto *NF = Function::Create(NFT, GlobalValue::LinkageTypes::InternalLinkage,
-                                "", M);
+    auto *NFT = FunctionType::get(FT->getReturnType(), v, FT->isVarArg());
+    auto *NF = Function::Create(NFT, GlobalValue::LinkageTypes::InternalLinkage, "", M);
     NF->addFnAttr(Attribute::AttrKind::NoInline);
     completeFunction(NF, Call);
 
@@ -340,6 +339,12 @@ static Function *createAndReplaceUsingProxyFunction(CallInst *Call, Module &M) {
     for (auto k = Call->arg_begin(); k != Call->arg_end(); ++k) {
       args.push_back(k->get());
     }
+
+    // if (args.size() != NF->arg_size()) {
+    //   errs() << "createAndReplaceUsingProxyFunction Failed: " << *Call << "\n";
+    //   errs() << *NF << "\n";
+    //   return nullptr;
+    // }
 
     llvm::ReplaceInstWithInst(Call, CallInst::Create(NFT, NF, args));
     return NF;
