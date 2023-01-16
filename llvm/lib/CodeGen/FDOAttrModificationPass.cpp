@@ -608,7 +608,8 @@ Function* FDOAttrModification2::getCloned(Function* F) {
   } 
   ValueToValueMapTy VMap;
   Function* clone = CloneFunction(F, VMap);
-  if (!clone) {return nullptr;}
+  ClonedFuncs[F] = clone; 
+  if (clone == nullptr) { return nullptr; }
   if (clone->hasFnAttribute("no_callee_saved_registers") == false) {
     clone->addFnAttr("no_callee_saved_registers");
     LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
