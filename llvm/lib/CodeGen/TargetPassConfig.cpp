@@ -388,7 +388,7 @@ struct InsertedPass {
 namespace llvm {
 
 extern cl::opt<bool> EnableFSDiscriminator;
-extern Pass* createFDOAttrModification2Pass();
+extern Pass* createFDOAttrModificationPass();
 
 static cl::opt<bool> FDO_IPRA("fdo-ipra", cl::Hidden, cl::init(false), cl::desc("Enable FDO-based IPRA"));
 extern cl::opt<std::string> MapOutput;
@@ -916,7 +916,7 @@ void TargetPassConfig::addIRPasses() {
     addPass(createLowerGlobalDtorsLegacyPass());
 
   if (FDO_IPRA) {
-    addPass(createFDOAttrModification2Pass());
+    addPass(createFDOAttrModificationPass());
   }
   
   // Make sure that no unreachable blocks are instruction selected.
@@ -1025,7 +1025,7 @@ void TargetPassConfig::addISelPrepare() {
         dbgs(), "\n\n*** Final LLVM Code input to ISel ***\n"));
 
   // if (FDO_IPRA) {
-  //   addPass(createFDOAttrModification2Pass());
+  //   addPass(createFDOAttrModificationPass());
   // }
 
   // All passes which modify the LLVM IR are now complete; run the verifier
