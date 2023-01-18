@@ -33,6 +33,10 @@ struct Counts {
   uint64_t Pop = 0;
   uint64_t StaticPush = 0;
   uint64_t StaticPop = 0;
+  uint64_t Spill = 0;
+  uint64_t Restore = 0;
+  uint64_t StaticSpill = 0;
+  uint64_t StaticRestore = 0;
 };
 
 class CountPushPop : public MachineFunctionPass {
@@ -46,6 +50,7 @@ public:
     auto MBFI = (PSI && PSI->hasProfileSummary())
                     ? &getAnalysis<LazyMachineBlockFrequencyInfoPass>().getBFI()
                     : nullptr;
+    const auto &TII = *MF.getSubtarget().getInstrInfo();
     for (auto &MBB : MF) {
       auto p = MBFI->getBlockProfileCount(&MBB);
       for (auto &MI : MBB) {
@@ -55,6 +60,14 @@ public:
         } else if (MI.getOpcode() == X86::POP64r) {
           if (MBFI && p) pgo.Pop += p.value();
           pgo.StaticPop += 1;
+        }
+        Optional<unsigned> Size;
+        if (Size = MI.getSpillSize(&TII)) {
+          if (MBFI && p) pgo.Spill += p.value() * Size.value();
+          pgo.StaticSpill += Size.value();
+        } else if (Size = MI.getRestoreSize(&TII)) {
+          if (MBFI && p) pgo.Restore += p.value() * Size.value();
+          pgo.StaticRestore += Size.value();
         }
       }
     }
@@ -67,9 +80,15 @@ public:
           if (p != m.end())
             for (auto &MI : MBB) {
               if (MI.getOpcode() == X86::PUSH64r) {
-                    perf.Push += p->second;
+                perf.Push += p->second;
               } else if (MI.getOpcode() == X86::POP64r) {
-                    perf.Pop += p->second;
+                perf.Pop += p->second;
+              }
+              Optional<unsigned> Size;
+              if (Size = MI.getSpillSize(&TII)) {
+                perf.Spill += p->second * Size.value();
+              } else if (Size = MI.getRestoreSize(&TII)) {
+                perf.Restore += p->second * Size.value();
               }
             }
         }
@@ -120,10 +139,17 @@ public:
       fprintf(pOut, "dynamic pop  count: %zu\n", pgo.Pop);
       fprintf(pOut, "static  push count: %zu\n", pgo.StaticPush);
       fprintf(pOut, "static  pop  count: %zu\n", pgo.StaticPop);
+      fprintf(pOut, "dynamic spill  (B): %zu\n", pgo.Spill);
+      fprintf(pOut, "dynamic reload (B): %zu\n", pgo.Restore);
+      fprintf(pOut, "static  spill  (B): %zu\n", pgo.StaticSpill);
+      fprintf(pOut, "static  reload (B): %zu\n", pgo.StaticRestore);
+
       if (UsePerfdata != "") {
         fprintf(pOut, "Using perfdata counting in perfdata %s\n", UsePerfdata.c_str()); 
         fprintf(pOut, "perf push count: %zu\n", perf.Push);
         fprintf(pOut, "perf pop  count: %zu\n", perf.Pop);
+        fprintf(pOut, "perf spill  (B): %zu\n", perf.Spill);
+        fprintf(pOut, "perf reload (B): %zu\n", perf.Restore);
       }
       fclose(pOut);
     }

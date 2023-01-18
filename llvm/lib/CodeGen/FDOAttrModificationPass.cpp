@@ -183,7 +183,7 @@ class FDOQuery {
   }
 
   bool initProfile() {
-    if (!RegProfilePath.empty()) {
+    if (!has_profile && !RegProfilePath.empty()) {
       has_profile = true;
       RP = &RegProfile::getProfile();
       use_PSI = false;
@@ -194,7 +194,7 @@ class FDOQuery {
         has_profile = true;
       }
     }
-    if (!AdditionHotFunctionList.empty()) {
+    if (!use_hot_function_list && !AdditionHotFunctionList.empty()) {
       std::fstream fin(AdditionHotFunctionList, std::ios_base::in);
       std::string name;
       while (std::getline(fin, name)) hot_functions.insert(name);
@@ -410,50 +410,46 @@ static Function *createProxyFunction(CallInst *Call, Module &M) {
 /**
  *  This implementation works both for ThinLTO and FullLTO
  */
-class FDOAttrModification : public FunctionPass, public FDOQuery {
+class FDOAttrModification : public ModulePass, public FDOQuery {
  public:
-  FDOAttrModification() : FunctionPass(ID), FDOQuery(this) {}
+  FDOAttrModification() : ModulePass(ID), FDOQuery(this) {}
 
   StringRef getPassName() const override {
     return "FDO based Attributes Modification Pass";
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
-    FunctionPass::getAnalysisUsage(AU);
+    ModulePass::getAnalysisUsage(AU);
     AU.addRequired<ProfileSummaryInfoWrapperPass>();
     AU.addRequired<BlockFrequencyInfoWrapperPass>();
     AU.setPreservesAll();
   }
 
-  bool runOnFunction(Function &F) override;
-
-  bool doInitialization(Module &M) override {
-    initProfile();
-    return false;
-  }
+  bool runOnModule(Module &M) override;
 
  protected:
   static char ID;
+
+  void CalleeToCaller(llvm::Function &F);
+  void CallerToCallee(llvm::Function &F);
 };
 
 char FDOAttrModification::ID = 0;
 
 
-bool FDOAttrModification::runOnFunction(Function &F) {
-  if (!has_profile) return false;
-  initBlockFreqInfo(&F);
-
+void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
+  if (OnHotEntryAndHotCallGraph) {
+    if (!isFunctionEntryHot(&F) && !isFunctionHotInCallGraph(&F)) return;
+  } else {
+    if (!isFunctionEntryHot(&F)) return;
+  }
+  
   if (ColdCallsiteColdCallee)
-    if (isFunctionEntryCold(&F))
+    if (isFunctionEntryCold(&F)) {
+      LLVM_DEBUG(dbgs() << "ColdFunction: " << F.getName() << "\n");
       if (F.hasFnAttribute("no_caller_saved_registers") == false)
         F.addFnAttr("no_caller_saved_registers");
-
-  if (OnHotEntryAndHotCallGraph) {
-    if (!isFunctionEntryHot(&F) && !isFunctionHotInCallGraph(&F)) return false;
-  } else {
-    if (!isFunctionEntryHot(&F)) return false;
-  }
-
+    }
   SmallVector<CallInst *, 64> callsites;
   for (auto &BB : F)
     for (auto &MI : BB)
@@ -463,8 +459,22 @@ bool FDOAttrModification::runOnFunction(Function &F) {
       }
 
   for (auto* call : callsites) {
+    Function *callee = call->getCalledFunction();
+    LLVM_DEBUG(dbgs() << "callsite: " << *call << "\n");
+    LLVM_DEBUG(dbgs() << "IsColdCallsite: " << isColdCallSite(*call) << "\n");
+    if (callee) {
+      LLVM_DEBUG(dbgs() << "isFunctionEntryCold: " << isFunctionEntryCold(callee) << "\n");
+      LLVM_DEBUG(dbgs() << "isFunctionEntryHot: " << isFunctionEntryHot(callee) << "\n");
+    }
+
+    if (ColdCallsiteColdCallee) {
+      if (isFunctionEntryCold(callee)) {
+        if (callee->hasFnAttribute("no_caller_saved_registers") == false)
+          callee->addFnAttr("no_caller_saved_registers");
+      }
+    }
+
     if (ColdCallsiteHotCallee) {
-      Function *callee = call->getCalledFunction();
       // if callsit is cold and callee is not indirect call and here we
       // create another proxy function call
       if (callee && isColdCallSite(*call) && isFunctionEntryHot(callee)) {
@@ -478,11 +488,7 @@ bool FDOAttrModification::runOnFunction(Function &F) {
     }
 
     if (HotCallsiteColdCallee) {
-      if (call->isIndirectCall()) {
-        LLVM_DEBUG(dbgs() << "indirect call detected!\n" << *call << "\n");
-        LLVM_DEBUG(dbgs() << "isColdCallsite: "
-                          << isColdCallSite(*call) << "\n");
-      }
+      if (call->isIndirectCall()) LLVM_DEBUG(dbgs() << "This is an indirect call!\n");
       if (call->isIndirectCall() && isColdCallSite(*call)) {
         Function *NF = createAndReplaceUsingProxyFunction(call, *F.getParent());
         if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
@@ -493,6 +499,25 @@ bool FDOAttrModification::runOnFunction(Function &F) {
       }
     }
   }
+}
+
+void FDOAttrModification::CallerToCallee(llvm::Function &F) {
+    
+}
+
+bool FDOAttrModification::runOnModule(Module &M) {
+  if (!initProfile()) return false;
+  
+
+  for (auto &F : M) {
+    if (F.isDeclaration()) continue;
+    initBlockFreqInfo(&F);
+
+    if (UseCalleeReg) CalleeToCaller(F);
+    if (UseCallerReg) CallerToCallee(F);
+  }
+
+  LLVM_DEBUG(M.dump());
   return false;
 }
 
@@ -570,7 +595,7 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
             callee->addFnAttr("no_caller_saved_registers");
             LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
           }
-          return;
+          continue;
         }
       }
     }
@@ -583,7 +608,7 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
         if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
           NF->addFnAttr("no_caller_saved_registers");
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-          return;
+          continue;
         }
       }
     }
@@ -595,7 +620,7 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
         if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
           NF->addFnAttr("no_caller_saved_registers");
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-          return;
+          continue;
         }
       }
     }
@@ -604,7 +629,7 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
 
 Function* FDOAttrModification2::getCloned(Function* F) {
   if (ClonedFuncs.find(F) != ClonedFuncs.end()) {
-      return ClonedFuncs[F];
+    return ClonedFuncs[F];
   } 
   ValueToValueMapTy VMap;
   Function* clone = CloneFunction(F, VMap);
@@ -630,20 +655,20 @@ void FDOAttrModification2::CallerToCallee(llvm::Function &F) {
 
   for (CallInst *call : callsites) {
     if (ColdCallsiteHotCallee) {
-      Function *callee = call->getCalledFunction();
-      if (callee && !callee->isDeclaration() && isFunctionEntryHot(callee)) {
-        // if callee is hot on entry
-        Function* clone = getCloned(callee);
-        if (clone) call->setCalledFunction(clone);
+      if (isColdCallSite(*call)) {
+        Function *callee = call->getCalledFunction();
+        if (callee && !callee->isDeclaration() && isFunctionEntryHot(callee)) {
+          // if callee is hot on entry
+          Function* clone = getCloned(callee);
+          if (clone) call->setCalledFunction(clone);
+        }
       }
     }
   }
 }
 
 bool FDOAttrModification2::runOnModule(Module &M) {
-  initProfile();
-
-  if (!has_profile) return false;
+  if (!initProfile()) return false;
 
   for (auto &F : M) {
     if (F.isDeclaration()) continue;

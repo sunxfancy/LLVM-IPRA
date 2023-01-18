@@ -67,10 +67,10 @@ public:
           Optional<unsigned> Size;
           if (Size = MI.getSpillSize(&TII)) {
             LLVM_DEBUG(dbgs() << "SpillInst: ";  MI.print(dbgs()));
-            count[spill] += Size.getValue();
+            count[spill] += Size.value();
           } else if (Size = MI.getRestoreSize(&TII)) {
             LLVM_DEBUG(dbgs() << "ReloadInst: ";  MI.print(dbgs()));
-            count[reload] += Size.getValue();
+            count[reload] += Size.value();
           }
         }
       }
