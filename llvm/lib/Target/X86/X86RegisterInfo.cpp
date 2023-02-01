@@ -295,7 +295,7 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   // If atribute specified, override the CSRs normally specified by the
   // calling convention and use the empty set instead.
   if (MF->getFunction().hasFnAttribute("no_callee_saved_registers"))
-    return CSR_64_HHVM_SaveList; //CSR_NoRegs_SaveList;
+    return CSR_64_CXX_TLS_Darwin_PE_SaveList; //CSR_NoRegs_SaveList;
 
   switch (CC) {
   case CallingConv::GHC:
@@ -419,6 +419,9 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   bool HasSSE = Subtarget.hasSSE1();
   bool HasAVX = Subtarget.hasAVX();
   bool HasAVX512 = Subtarget.hasAVX512();
+
+  if (MF.getFunction().hasFnAttribute("no_callee_saved_registers"))
+    return CSR_64_CXX_TLS_Darwin_PE_RegMask; //CSR_NoRegs_SaveList;
 
   switch (CC) {
   case CallingConv::GHC:

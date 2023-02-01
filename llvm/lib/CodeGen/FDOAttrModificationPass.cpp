@@ -26,6 +26,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/Verifier.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -40,41 +42,24 @@ using namespace llvm;
 
 static cl::opt<bool> UseNewImpl("fdoipra-new-impl", cl::init(false), cl::Hidden);
 
-static cl::opt<bool> OnHotEntryAndHotCallGraph("fdoipra-both-hot",
-                                               cl::init(true), cl::Hidden);
-static cl::opt<bool> ColdCallsiteColdCallee("fdoipra-cc", cl::init(true),
-                                            cl::Hidden);
-static cl::opt<bool> ColdCallsiteHotCallee("fdoipra-ch", cl::init(false),
-                                           cl::Hidden);
-static cl::opt<bool> HotCallsiteColdCallee("fdoipra-hc", cl::init(false),
-                                           cl::Hidden);
-static cl::opt<bool> HotCallsiteHotCallee("fdoipra-hh", cl::init(false),
-                                          cl::Hidden);
+static cl::opt<bool> OnHotEntryAndHotCallGraph("fdoipra-both-hot", cl::init(true), cl::Hidden);
+static cl::opt<bool> ColdCallsiteColdCallee("fdoipra-cc", cl::init(true), cl::Hidden);
+static cl::opt<bool> ColdCallsiteHotCallee("fdoipra-ch", cl::init(false), cl::Hidden);
+static cl::opt<bool> HotCallsiteColdCallee("fdoipra-hc", cl::init(false), cl::Hidden);
+static cl::opt<bool> HotCallsiteHotCallee("fdoipra-hh", cl::init(false), cl::Hidden);
 
-static cl::opt<bool> UseCalleeReg("fdoipra-use-callee-reg", cl::init(true),
-                                  cl::Hidden);
+static cl::opt<bool> UseCalleeReg("fdoipra-use-callee-reg", cl::init(true), cl::Hidden);
+static cl::opt<bool> UseCallerReg("fdoipra-use-caller-reg", cl::init(false), cl::Hidden);
 
-static cl::opt<bool> UseCallerReg("fdoipra-use-caller-reg", cl::init(false),
-                                  cl::Hidden);
+static cl::opt<std::string> RegProfilePath("fdoipra-profile", cl::init(""), cl::Hidden);
+static cl::opt<bool> FDOIPRARunOnMachineFunction("fdoipra-on-machinefunc", cl::init(false), cl::Hidden);
 
-static cl::opt<std::string> RegProfilePath("fdoipra-profile", cl::init(""),
-                                           cl::Hidden);
+static cl::opt<std::string> UseMapOutput("use_bbidx_map", cl::init(""), cl::Hidden);
+static cl::opt<std::string> AdditionHotFunctionList("fdoipra-hot-list", cl::init(""), cl::Hidden);
+static cl::opt<std::string> OutputPSI("fdoipra-psi", cl::ValueOptional, cl::init("off"), cl::Hidden);
+static cl::opt<float> CallsiteColdRatio("fdoipra-ccr", cl::init(10.0f), cl::Hidden);
 
-static cl::opt<bool> FDOIPRARunOnMachineFunction("fdoipra-on-machinefunc",
-                                                 cl::init(false), cl::Hidden);
-
-static cl::opt<std::string> UseMapOutput("use_bbidx_map", cl::init(""),
-                                         cl::Hidden);
-
-static cl::opt<std::string> AdditionHotFunctionList("fdoipra-hot-list",
-                                          cl::init(""), cl::Hidden);
-
-static cl::opt<std::string> OutputPSI("fdoipra-psi", cl::ValueOptional,
-                                      cl::init("off"), cl::Hidden);
-
-static cl::opt<float> CallsiteColdRatio("fdoipra-ccr",
-                                      cl::init(10.0f), cl::Hidden);
-
+static cl::opt<bool> ChangeDWARF("fdoipra-dwarf", cl::init(false), cl::Hidden);
 
 namespace llvm {
   cl::opt<std::string> MapOutput("bbidx_map", cl::init(""), cl::Hidden);
@@ -320,6 +305,51 @@ struct BBMap {
   std::map<int, int> data;
 };
 
+static void changeDebugFunctionName(llvm::Function &F, std::string attr) {
+  if (!F.hasMetadata("dbg")) {
+    Module& M = *F.getParent();
+    M.addModuleFlag(Module::Warning, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
+    M.addModuleFlag(Module::Warning, "Dwarf Version", dwarf::DWARF_VERSION);
+    
+    DIBuilder DBuilder(M);
+    DIFile *Unit = DBuilder.createFile("unknown", ".");
+    DBuilder.createCompileUnit(dwarf::DW_LANG_C99, Unit, "FDOAttrModification Pass", true, "", 0);
+    DISubprogram *SP = DBuilder.createFunction(
+        Unit, F.getName(), "", Unit, 0, 
+        DBuilder.createSubroutineType(DBuilder.getOrCreateTypeArray(None)), 
+        0, DINode::FlagZero, DISubprogram::SPFlagDefinition);
+    F.setSubprogram(SP);
+    DBuilder.finalizeSubprogram(SP); 
+    DBuilder.finalize();
+  }
+
+  auto* metadata = F.getMetadata("dbg");
+  auto* node = dyn_cast<DISubprogram>(metadata);
+  std::string old_name = node->getName().str();
+  std::string name = old_name;
+  if (old_name.at(old_name.size()-1) == ')') {
+    int begin = old_name.find_first_of('(');
+    int end = old_name.size() - 1;
+    if (old_name.find(attr, begin) == std::string::npos)
+      name = old_name.substr(0, old_name.size()-1) + "," + attr + ")";
+  } else {
+    name = old_name + "(" + attr + ")";
+  }
+  if (node) node->replaceOperandWith(2, MDString::get(F.getContext(), name));
+}
+
+static void markFunctionNoCalleeSaved(llvm::Function &F) {
+  if (F.hasFnAttribute("no_callee_saved_registers") == false)
+    F.addFnAttr("no_callee_saved_registers");
+  // changeDebugFunctionName(F, "no_callee_saved");
+}
+
+static void markFunctionNoCallerSaved(llvm::Function &F) {
+  if (F.hasFnAttribute("no_caller_saved_registers") == false)
+    F.addFnAttr("no_caller_saved_registers");
+  // changeDebugFunctionName(F, "no_caller_saved");
+}
+
 
 static void findAllCallsite(llvm::Function &F, SmallVector<CallInst*, 64>& callsites) {
   for (auto &BB : F)
@@ -374,8 +404,7 @@ static Function *createAndReplaceUsingProxyFunction(CallInst *Call, Module &M) {
     llvm::ReplaceInstWithInst(Call, CallInst::Create(NFT, NF, args));
     return NF;
   } else {
-    LLVM_DEBUG(dbgs() << "createAndReplaceUsingProxyFunction Failed: " << *Call
-                      << "\n");
+    LLVM_DEBUG(dbgs() << "createAndReplaceUsingProxyFunction Failed: " << *Call << "\n");
     return nullptr;
   }
 }
@@ -447,8 +476,7 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
   if (ColdCallsiteColdCallee)
     if (isFunctionEntryCold(&F)) {
       LLVM_DEBUG(dbgs() << "ColdFunction: " << F.getName() << "\n");
-      if (F.hasFnAttribute("no_caller_saved_registers") == false)
-        F.addFnAttr("no_caller_saved_registers");
+      markFunctionNoCallerSaved(F);
     }
   SmallVector<CallInst *, 64> callsites;
   for (auto &BB : F)
@@ -469,8 +497,7 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
 
     if (ColdCallsiteColdCallee) {
       if (isFunctionEntryCold(callee)) {
-        if (callee->hasFnAttribute("no_caller_saved_registers") == false)
-          callee->addFnAttr("no_caller_saved_registers");
+        markFunctionNoCallerSaved(*callee);
       }
     }
 
@@ -479,8 +506,8 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
       // create another proxy function call
       if (callee && isColdCallSite(*call) && isFunctionEntryHot(callee)) {
         Function *NF = createProxyFunction(call, *F.getParent());
-        if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-          NF->addFnAttr("no_caller_saved_registers");
+        if (NF) {
+          markFunctionNoCallerSaved(F);
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
           continue;
         }
@@ -491,8 +518,8 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
       if (call->isIndirectCall()) LLVM_DEBUG(dbgs() << "This is an indirect call!\n");
       if (call->isIndirectCall() && isColdCallSite(*call)) {
         Function *NF = createAndReplaceUsingProxyFunction(call, *F.getParent());
-        if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-          NF->addFnAttr("no_caller_saved_registers");
+        if (NF) {
+          markFunctionNoCallerSaved(*NF);
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
           continue;
         }
@@ -566,12 +593,9 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
   }
 
   LLVM_DEBUG(dbgs() << "caller has profile: " << F.getName() << "\n");
-  LLVM_DEBUG(dbgs() << "hot threshod = " << PSI->getHotCountThreshold()
-                    << "\n");
-  LLVM_DEBUG(dbgs() << "func addr: " << (&F.getFunction())
-                    << "  func count: "
+  LLVM_DEBUG(dbgs() << "hot threshod = " << PSI->getHotCountThreshold() << "\n");
+  LLVM_DEBUG(dbgs() << "func addr: " << (&F.getFunction()) << "  func count: "
                     << F.getFunction().getEntryCount()->getCount() << "\n");
-
   LLVM_DEBUG(dbgs() << "hot caller: " << F.getName() << "\n");
 
   SmallVector<CallInst*, 64> callsites;
@@ -591,10 +615,7 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
         if (isFunctionEntryCold(callee)) {
           LLVM_DEBUG(dbgs() << "Adding attributes from hot " << F.getName()
                             << " to cold " << callee->getName() << "\n");
-          if (callee->hasFnAttribute("no_caller_saved_registers") == false) {
-            callee->addFnAttr("no_caller_saved_registers");
-            LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-          }
+          markFunctionNoCallerSaved(*callee);
           continue;
         }
       }
@@ -605,8 +626,8 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
       // create another proxy function call
       if (callee && isColdCallSite(*call) && isFunctionEntryHot(callee)) {
         Function *NF = createProxyFunction(call, *F.getParent());
-        if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-          NF->addFnAttr("no_caller_saved_registers");
+        if (NF) {
+          markFunctionNoCallerSaved(*NF);
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
           continue;
         }
@@ -617,8 +638,8 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
       if (call->isIndirectCall()) LLVM_DEBUG(dbgs() << "This is an indirect call!\n");
       if (call->isIndirectCall() && isColdCallSite(*call)) {
         Function *NF = createAndReplaceUsingProxyFunction(call, *F.getParent());
-        if (NF && NF->hasFnAttribute("no_caller_saved_registers") == false) {
-          NF->addFnAttr("no_caller_saved_registers");
+        if (NF) {
+          markFunctionNoCallerSaved(*NF);
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
           continue;
         }
@@ -633,12 +654,10 @@ Function* FDOAttrModification2::getCloned(Function* F) {
   } 
   ValueToValueMapTy VMap;
   Function* clone = CloneFunction(F, VMap);
+  clone->setName(F->getName() + ".clone");
   ClonedFuncs[F] = clone; 
   if (clone == nullptr) { return nullptr; }
-  if (clone->hasFnAttribute("no_callee_saved_registers") == false) {
-    clone->addFnAttr("no_callee_saved_registers");
-    LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
-  }
+  markFunctionNoCalleeSaved(*clone);
   return clone;
 }
 
@@ -667,6 +686,18 @@ void FDOAttrModification2::CallerToCallee(llvm::Function &F) {
   }
 }
 
+static void changeDWARFforFunction(Function &F) {
+  if (!F.hasMetadata("dbg")) return;
+  auto* metadata = F.getMetadata("dbg");
+  auto* node = dyn_cast<DISubprogram>(metadata);
+  if (node) {
+    // if (node->getNumOperands() >= 3) {
+    //   node->replaceLinkageName(MDString::get(F.getContext(), "_Z15no_caller_savedv"));
+    // }
+    node->replaceOperandWith(2, MDString::get(F.getContext(), F.getName().str()+"(clone)"));
+  }
+}
+
 bool FDOAttrModification2::runOnModule(Module &M) {
   if (!initProfile()) return false;
 
@@ -676,9 +707,15 @@ bool FDOAttrModification2::runOnModule(Module &M) {
 
     if (UseCalleeReg) CalleeToCaller(F);
     if (UseCallerReg) CallerToCallee(F);
+
+    if (ChangeDWARF) {
+      changeDWARFforFunction(F);
+    }
   }
 
   if (OutputPSI != "off") dumpPSI(M);
+  LLVM_DEBUG(M.dump());
+  LLVM_DEBUG(llvm::verifyModule(M, &dbgs()));
   return false;
 }
 
@@ -686,6 +723,7 @@ struct Record {
   std::string name;
   uint64_t freq;
   bool no_caller_saved_registers = false;
+  bool no_callee_saved_registers = false;
   bool in_hot_list = false;
 
   bool operator<(const Record& other) const {
@@ -699,44 +737,46 @@ void FDOAttrModification2::dumpPSI(Module &M) {
   std::string path = OutputPSI.empty() ? std::string("/tmp/fdoipra-psi.txt")
                                        : OutputPSI;
   auto* PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
-  if (PSI) {
-    std::vector<Record> hot;
-    std::vector<Record> normal;
-    std::vector<Record> cold;
+  if (PSI == nullptr) return;
 
-    for (auto &F : M) {
-      if (F.isDeclaration()) continue;
-      auto* BFI = &getAnalysis<BlockFrequencyInfoWrapperPass>(F).getBFI();
-      if (!BFI) continue;
-      bool in_hot_list = hot_functions.count(F.getName().str()) != 0;
-      auto bpc = BFI->getBlockProfileCount(&F.getEntryBlock());
-      uint64_t count = 0;
-      if (bpc.hasValue()) count = bpc.getValue();
-      Record record{F.getName().str(), count,
-          F.hasFnAttribute("no_caller_saved_registers"), in_hot_list};
+  std::vector<Record> hot;
+  std::vector<Record> normal;
+  std::vector<Record> cold;
 
-      if (PSI->isFunctionEntryHot(&F))
-        hot.push_back(record);
-      else if (PSI->isFunctionEntryCold(&F))
-        cold.push_back(record);
-      else
-        normal.push_back(record);
-    }
+  for (auto &F : M) {
+    if (F.isDeclaration()) continue;
+    auto* BFI = &getAnalysis<BlockFrequencyInfoWrapperPass>(F).getBFI();
+    if (!BFI) continue;
+    bool in_hot_list = hot_functions.count(F.getName().str()) != 0;
+    auto bpc = BFI->getBlockProfileCount(&F.getEntryBlock());
+    uint64_t count = 0;
+    if (bpc.hasValue()) count = bpc.getValue();
+    Record record{F.getName().str(), count,
+        F.hasFnAttribute("no_caller_saved_registers"), 
+        F.hasFnAttribute("no_callee_saved_registers"),
+        in_hot_list};
 
-    std::sort(hot.begin(), hot.end());
-    std::sort(cold.begin(), cold.end());
-    std::sort(normal.begin(), normal.end());
+    if (PSI->isFunctionEntryHot(&F))
+      hot.push_back(record);
+    else if (PSI->isFunctionEntryCold(&F))
+      cold.push_back(record);
+    else
+      normal.push_back(record);
+  }
 
-    std::vector<Record>* buffer[3] = {&hot, &cold, &normal};
-    std::vector<std::string> names = {"hot", "cold", "normal"};
-    std::ofstream fout(path, std::ios_base::out);
-    for (int i = 0; i < 3; ++i) {
-      fout << names[i] << " functions:" << std::endl;
-      for (int j = 0; j < buffer[i]->size(); ++j) {
-        Record& c = buffer[i]->at(j);
-        fout << (c.no_caller_saved_registers? "* ": "") <<
-          c.name << " " << c.freq << (c.in_hot_list ? " hl" : "") << std::endl;
-      }
+  std::sort(hot.begin(), hot.end());
+  std::sort(cold.begin(), cold.end());
+  std::sort(normal.begin(), normal.end());
+
+  std::vector<Record>* buffer[3] = {&hot,  &cold,  &normal };
+  std::vector<std::string> names = {"hot", "cold", "normal"};
+  std::ofstream fout(path, std::ios_base::out);
+  for (int i = 0; i < 3; ++i) {
+    fout << names[i] << " functions:" << std::endl;
+    for (int j = 0; j < buffer[i]->size(); ++j) {
+      Record& c = buffer[i]->at(j);
+      fout << (c.no_caller_saved_registers? "* ": "")<< (c.no_callee_saved_registers? "$ ": "") << 
+        c.name << " " << c.freq << (c.in_hot_list ? " hl" : "") << std::endl;
     }
   }
 }
