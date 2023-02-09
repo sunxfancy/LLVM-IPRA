@@ -235,6 +235,9 @@ namespace CallingConv {
     /// Used for M68k interrupt routines.
     M68k_INTR = 101,
 
+    /// X86 GP Registers No Caller Saved
+    X86_GP_INTR = 104,
+
     /// The highest possible ID. Must be some 2^k - 1.
     MaxID = 1023
   };

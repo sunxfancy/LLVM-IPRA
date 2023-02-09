@@ -290,7 +290,8 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   // If attribute NoCallerSavedRegisters exists then we set X86_INTR calling
   // convention because it has the CSR list.
   if (MF->getFunction().hasFnAttribute("no_caller_saved_registers"))
-    CC = CallingConv::X86_INTR;
+    CC = CallingConv::X86_GP_INTR;
+    // return CSR_64_AllRegs_NoSSE_SaveList; // CC = CallingConv::X86_INTR;
 
   // If atribute specified, override the CSRs normally specified by the
   // calling convention and use the empty set instead.
@@ -382,6 +383,9 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
         return CSR_32_AllRegs_SSE_SaveList;
       return CSR_32_AllRegs_SaveList;
     }
+  case CallingConv::X86_GP_INTR:
+    assert(Is64Bit && "X86_GP_INTR calling convention only used on 64-bit X86");
+    return CSR_64_AllRegs_NoSSE_SaveList;
   default:
     break;
   }
@@ -419,6 +423,9 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   bool HasSSE = Subtarget.hasSSE1();
   bool HasAVX = Subtarget.hasAVX();
   bool HasAVX512 = Subtarget.hasAVX512();
+
+  // if (MF.getFunction().hasFnAttribute("no_caller_saved_registers"))
+  //   return CSR_64_AllRegs_NoSSE_RegMask;
 
   if (MF.getFunction().hasFnAttribute("no_callee_saved_registers"))
     return CSR_64_CXX_TLS_Darwin_PE_RegMask; //CSR_NoRegs_SaveList;
@@ -503,6 +510,8 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
         return CSR_32_AllRegs_SSE_RegMask;
       return CSR_32_AllRegs_RegMask;
     }
+  case CallingConv::X86_GP_INTR:
+    return CSR_64_AllRegs_NoSSE_RegMask;
   default:
     break;
   }

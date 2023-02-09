@@ -4818,7 +4818,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     // use X86_INTR calling convention because it has the same CSR mask
     // (same preserved registers).
     if (HasNCSR)
-      AdaptedCC = (CallingConv::ID)CallingConv::X86_INTR;
+      AdaptedCC = (CallingConv::ID)CallingConv::X86_GP_INTR;
     // If NoCalleeSavedRegisters is requested, than use GHC since it happens
     // to use the CSR_NoRegs_RegMask.
     if (CB && CB->hasFnAttr("no_callee_saved_registers"))
