@@ -47,6 +47,7 @@ static cl::opt<bool> ColdCallsiteColdCallee("fdoipra-cc", cl::init(true), cl::Hi
 static cl::opt<bool> ColdCallsiteHotCallee("fdoipra-ch", cl::init(false), cl::Hidden);
 static cl::opt<bool> HotCallsiteColdCallee("fdoipra-hc", cl::init(false), cl::Hidden);
 static cl::opt<bool> HotCallsiteHotCallee("fdoipra-hh", cl::init(false), cl::Hidden);
+static cl::opt<bool> BasicIPRA("fdoipra-basic", cl::init(false), cl::Hidden);
 
 static cl::opt<bool> UseCalleeReg("fdoipra-use-callee-reg", cl::init(true), cl::Hidden);
 static cl::opt<bool> UseCallerReg("fdoipra-use-caller-reg", cl::init(false), cl::Hidden);
@@ -350,6 +351,10 @@ static void markFunctionNoCallerSaved(llvm::Function &F) {
   // changeDebugFunctionName(F, "no_caller_saved");
 }
 
+static void markFunctionIPRALeaf(llvm::Function &F) {
+  if (F.hasFnAttribute("ipra_leaf_node") == false)
+    F.addFnAttr("ipra_leaf_node");
+}
 
 static void findAllCallsite(llvm::Function &F, SmallVector<CallInst*, 64>& callsites) {
   for (auto &BB : F)
@@ -358,6 +363,17 @@ static void findAllCallsite(llvm::Function &F, SmallVector<CallInst*, 64>& calls
         CallInst *call = dyn_cast<CallInst>(&MI);
         callsites.push_back(call);
       }
+}
+
+
+static bool isLeafInCallGraph(llvm::Function *F) {
+  for (auto &BB : *F) 
+    for (auto &I : BB) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      auto *II = dyn_cast<InvokeInst>(&I);
+      if (CI || II) return false;
+    }
+  return true;
 }
 
 
@@ -643,6 +659,13 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
           continue;
         }
+      }
+    }
+
+    if (BasicIPRA) {
+      if (callee && !callee->isDeclaration()) { 
+        if (isLeafInCallGraph(callee)) 
+          markFunctionIPRALeaf(*callee);
       }
     }
   }
