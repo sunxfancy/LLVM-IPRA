@@ -2427,6 +2427,11 @@ static void postParseObjectFile(ELFFileBase *file) {
   }
 }
 
+namespace llvm {
+extern void fdoipra_debug_output();
+}
+
+
 // Do actual linking. Note that when this function is called,
 // all linker scripts have already been parsed.
 void LinkerDriver::link(opt::InputArgList &args) {
@@ -2808,7 +2813,8 @@ void LinkerDriver::link(opt::InputArgList &args) {
       if (Optional<MemoryBufferRef> buffer = readFile(arg->getValue()))
         readCallGraph(*buffer);
     invokeELFT(readCallGraphsFromObjectFiles);
-  }
+  }  
+  fdoipra_debug_output();
 
   // Write the result to the file.
   invokeELFT(writeResult);

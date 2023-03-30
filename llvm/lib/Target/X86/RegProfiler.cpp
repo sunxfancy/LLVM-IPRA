@@ -62,6 +62,7 @@ public:
   llvm::GlobalValue *SpillInPrologueForNCeSR, *ReloadInPrologueForNCeSR;
   llvm::GlobalValue *SpillInPrologueForNCrSR, *ReloadInPrologueForNCrSR;
 
+  llvm::GlobalValue *MemoryLoad, *MemoryStore;
 
   InstrumentRegProfilerPass() : MachineFunctionPass(ID) {}
 
@@ -198,6 +199,9 @@ public:
     ReloadInPrologueForNCeSR = dyn_cast<GlobalValue>(M.getOrInsertGlobal("__LLVM_IRPP_ReloadInPrologueForNCeSR", Type::getInt64Ty(M.getContext())));
     SpillInPrologueForNCrSR = dyn_cast<GlobalValue>(M.getOrInsertGlobal("__LLVM_IRPP_SpillInPrologueForNCrSR", Type::getInt64Ty(M.getContext())));
     ReloadInPrologueForNCrSR = dyn_cast<GlobalValue>(M.getOrInsertGlobal("__LLVM_IRPP_ReloadInPrologueForNCrSR", Type::getInt64Ty(M.getContext())));
+
+    MemoryLoad = dyn_cast<GlobalValue>(M.getOrInsertGlobal("__LLVM_IRPP_MemoryLoad", Type::getInt64Ty(M.getContext())));
+    MemoryStore = dyn_cast<GlobalValue>(M.getOrInsertGlobal("__LLVM_IRPP_MemoryStore", Type::getInt64Ty(M.getContext())));
     return true;
   }
 

@@ -35,6 +35,8 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <iostream>
+#include <functional>
 
 using namespace llvm;
 
@@ -60,6 +62,7 @@ static cl::opt<std::string> AdditionHotFunctionList("fdoipra-hot-list", cl::init
 static cl::opt<std::string> OutputPSI("fdoipra-psi", cl::ValueOptional, cl::init("off"), cl::Hidden);
 static cl::opt<float> CallsiteColdRatio("fdoipra-ccr", cl::init(10.0f), cl::Hidden);
 
+static cl::opt<bool> NCSR_UseClone("fdoipra-use-clone", cl::init(false), cl::Hidden);
 static cl::opt<bool> ChangeDWARF("fdoipra-dwarf", cl::init(false), cl::Hidden);
 
 namespace llvm {
@@ -214,6 +217,7 @@ class FDOQuery {
   std::set<int> *hot_bb = nullptr;
 
   bool use_hot_function_list = false;
+public:
   std::set<std::string> hot_functions;
 };
 
@@ -449,6 +453,114 @@ static Function *createProxyFunction(CallInst *Call, Module &M) {
   return FF;
 }
 
+struct Record {
+  std::string name;
+  uint64_t freq;
+  bool no_caller_saved_registers = false;
+  bool no_callee_saved_registers = false;
+  bool in_hot_list = false;
+
+  bool operator<(const Record& other) const {
+    if (freq < other.freq) return true;
+    if (freq == other.freq) return name < other.name;
+    return false;
+  }
+};
+
+struct RecordFile {
+  bool should_dump = false;
+
+  std::string path;
+  void setPath(std::string p) { 
+    path = p; should_dump = true; 
+    LLVM_DEBUG(dbgs() << "set path: " << path << "\n");
+    LLVM_DEBUG(dbgs() << "on object: " << this << "\n");
+  }
+
+  std::mutex mut;
+  std::vector<Record> hot;
+  std::vector<Record> normal;
+  std::vector<Record> cold;
+
+  void dump() {
+    std::sort(hot.begin(), hot.end());
+    std::sort(cold.begin(), cold.end());
+    std::sort(normal.begin(), normal.end());
+
+    std::vector<Record>* buffer[3] = {&hot,  &cold,  &normal };
+    std::vector<std::string> names = {"hot", "cold", "normal"};
+    std::ofstream fout(path, std::ios_base::out);
+    for (int i = 0; i < 3; ++i) {
+      fout << names[i] << " functions:" << std::endl;
+      for (int j = 0; j < buffer[i]->size(); ++j) {
+        Record& c = buffer[i]->at(j);
+        fout << (c.no_caller_saved_registers? "* ": "")<< (c.no_callee_saved_registers? "$ ": "") << 
+          c.name << " " << c.freq << (c.in_hot_list ? " hl" : "") << std::endl;
+      }
+    }
+  }
+
+  void dumpOnExit() {
+    if (should_dump) dump();
+  }
+
+  static RecordFile* getInst() {
+    static RecordFile inst;
+    return &inst;
+  }
+
+};
+
+
+void fdoipra_debug_output() {
+  RecordFile::getInst()->dumpOnExit();
+}
+
+
+void dumpPSI(Module &M, llvm::Pass* pass, FDOQuery* query) {
+  std::string path = OutputPSI.empty() ? std::string("/tmp/fdoipra-psi.txt")
+                                       : OutputPSI;
+  auto* PSI = &pass->getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
+  LLVM_DEBUG(dbgs() << "PSI is NULL: " << (PSI == nullptr) << "\n");
+  if (PSI == nullptr) return;
+  RecordFile::getInst()->setPath(path);
+  
+  
+  std::vector<Record> hot;
+  std::vector<Record> normal;
+  std::vector<Record> cold;
+
+  for (auto &F : M) {
+    if (F.isDeclaration()) continue;
+    auto* BFI = &pass->getAnalysis<BlockFrequencyInfoWrapperPass>(F).getBFI();
+    LLVM_DEBUG(dbgs() << "BFI is NULL: " << (BFI == nullptr) << "\n");
+    if (!BFI) continue;
+    bool in_hot_list = query->hot_functions.count(F.getName().str()) != 0;
+    auto bpc = BFI->getBlockProfileCount(&F.getEntryBlock());
+    uint64_t count = 0;
+    if (bpc.hasValue()) count = bpc.getValue();
+    Record record{F.getName().str(), count,
+        F.hasFnAttribute("no_caller_saved_registers"), 
+        F.hasFnAttribute("no_callee_saved_registers"),
+        in_hot_list};
+
+    if (PSI->isFunctionEntryHot(&F))
+      hot.push_back(record);
+    else if (PSI->isFunctionEntryCold(&F))
+      cold.push_back(record);
+    else
+      normal.push_back(record);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(RecordFile::getInst()->mut);
+    RecordFile::getInst()->hot.insert(RecordFile::getInst()->hot.end(), hot.begin(), hot.end());
+    RecordFile::getInst()->normal.insert(RecordFile::getInst()->normal.end(), normal.begin(), normal.end());
+    RecordFile::getInst()->cold.insert(RecordFile::getInst()->cold.end(), cold.begin(), cold.end());
+  }
+}
+
+
 // ---------------------------------------------
 
 
@@ -483,17 +595,20 @@ char FDOAttrModification::ID = 0;
 
 
 void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
+  if (ColdCallsiteColdCallee) {
+    LLVM_DEBUG(dbgs() << "Now Function: " << F.getName() << "\n");
+    if (isFunctionEntryCold(&F)) {
+      LLVM_DEBUG(dbgs() << "ColdFunction: " << F.getName() << "\n");
+      markFunctionNoCallerSaved(F);
+    }
+  }
+
   if (OnHotEntryAndHotCallGraph) {
     if (!isFunctionEntryHot(&F) && !isFunctionHotInCallGraph(&F)) return;
   } else {
     if (!isFunctionEntryHot(&F)) return;
   }
   
-  if (ColdCallsiteColdCallee)
-    if (isFunctionEntryCold(&F)) {
-      LLVM_DEBUG(dbgs() << "ColdFunction: " << F.getName() << "\n");
-      markFunctionNoCallerSaved(F);
-    }
   SmallVector<CallInst *, 64> callsites;
   for (auto &BB : F)
     for (auto &MI : BB)
@@ -511,19 +626,13 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
       LLVM_DEBUG(dbgs() << "isFunctionEntryHot: " << isFunctionEntryHot(callee) << "\n");
     }
 
-    if (ColdCallsiteColdCallee) {
-      if (isFunctionEntryCold(callee)) {
-        markFunctionNoCallerSaved(*callee);
-      }
-    }
-
     if (ColdCallsiteHotCallee) {
       // if callsit is cold and callee is not indirect call and here we
       // create another proxy function call
       if (callee && isColdCallSite(*call) && isFunctionEntryHot(callee)) {
         Function *NF = createProxyFunction(call, *F.getParent());
         if (NF) {
-          markFunctionNoCallerSaved(F);
+          markFunctionNoCallerSaved(*NF);
           LLVM_DEBUG(dbgs() << "set no caller saved registers\n");
           continue;
         }
@@ -550,7 +659,6 @@ void FDOAttrModification::CallerToCallee(llvm::Function &F) {
 
 bool FDOAttrModification::runOnModule(Module &M) {
   if (!initProfile()) return false;
-  
 
   for (auto &F : M) {
     if (F.isDeclaration()) continue;
@@ -559,8 +667,13 @@ bool FDOAttrModification::runOnModule(Module &M) {
     if (UseCalleeReg) CalleeToCaller(F);
     if (UseCallerReg) CallerToCallee(F);
   }
+// if (NCSR_UseClone == false) 
+//     removeHotCallsiteCases(M);
+
+  if (OutputPSI != "off") dumpPSI(M, this, this);
 
   LLVM_DEBUG(M.dump());
+  LLVM_DEBUG(llvm::verifyModule(M, &dbgs()));
   return false;
 }
 
@@ -588,12 +701,11 @@ class FDOAttrModification2 : public ModulePass, public FDOQuery {
 
   bool runOnModule(Module &M) override;
 
-  void dumpPSI(Module &M);
-
  protected:
   std::unordered_map<Function *, Function *> ClonedFuncs;
   Function* getCloned(Function* F);
-
+  bool isHotCallee(llvm::Function* callee);
+  void removeHotCallsiteCases(Module& M);
   static char ID;
 };
 
@@ -684,29 +796,30 @@ Function* FDOAttrModification2::getCloned(Function* F) {
   return clone;
 }
 
-void FDOAttrModification2::CallerToCallee(llvm::Function &F) {
-  // if this is a not cold function
-  if (OnHotEntryAndHotCallGraph) {
-    if (isFunctionEntryHot(&F) || isFunctionHotInCallGraph(&F)) return;
-  } else {
-    if (isFunctionEntryHot(&F)) return;
-  }
+bool FDOAttrModification2::isHotCallee(llvm::Function* callee) {
+  if (OnHotEntryAndHotCallGraph)
+    if (isFunctionEntryHot(callee) || isFunctionHotInCallGraph(callee)) return true;
+  else
+    if (isFunctionEntryHot(callee)) return true;
+}
 
+void FDOAttrModification2::CallerToCallee(llvm::Function &F) {
   SmallVector<CallInst*, 64> callsites;
   findAllCallsite(F, callsites);
 
-  for (CallInst *call : callsites) {
-    if (ColdCallsiteHotCallee) {
+  for (CallInst *call : callsites) 
+    if (ColdCallsiteHotCallee) 
       if (isColdCallSite(*call)) {
         Function *callee = call->getCalledFunction();
-        if (callee && !callee->isDeclaration() && isFunctionEntryHot(callee)) {
-          // if callee is hot on entry
-          Function* clone = getCloned(callee);
-          if (clone) call->setCalledFunction(clone);
+        if (callee && !callee->isDeclaration() && isHotCallee(callee)) {
+          if (NCSR_UseClone) {
+            Function* clone = getCloned(callee);
+            if (clone) call->setCalledFunction(clone);
+          } else {
+            markFunctionNoCalleeSaved(*callee);
+          }
         }
       }
-    }
-  }
 }
 
 static void changeDWARFforFunction(Function &F) {
@@ -721,6 +834,21 @@ static void changeDWARFforFunction(Function &F) {
   }
 }
 
+void FDOAttrModification2::removeHotCallsiteCases(Module& M) {
+  for (auto &F : M) {
+    if (F.isDeclaration()) continue;
+    SmallVector<CallInst*, 64> callsites;
+    findAllCallsite(F, callsites);
+    for (CallInst *call : callsites) 
+      if (!isColdCallSite(*call)) {
+        Function *callee = call->getCalledFunction();
+        if (callee && !callee->isDeclaration() && isHotCallee(callee)) 
+          if (callee->hasFnAttribute("no_callee_saved_registers")) 
+            callee->removeFnAttr("no_callee_saved_registers");
+      }
+  }
+}
+
 bool FDOAttrModification2::runOnModule(Module &M) {
   if (!initProfile()) return false;
 
@@ -731,78 +859,19 @@ bool FDOAttrModification2::runOnModule(Module &M) {
     if (UseCalleeReg) CalleeToCaller(F);
     if (UseCallerReg) CallerToCallee(F);
 
-    if (ChangeDWARF) {
-      changeDWARFforFunction(F);
-    }
+    if (ChangeDWARF) changeDWARFforFunction(F);
   }
 
-  if (OutputPSI != "off") dumpPSI(M);
+  if (NCSR_UseClone == false) 
+    removeHotCallsiteCases(M);
+
+  if (OutputPSI != "off") dumpPSI(M, this, this);
+
   LLVM_DEBUG(M.dump());
   LLVM_DEBUG(llvm::verifyModule(M, &dbgs()));
   return false;
 }
 
-struct Record {
-  std::string name;
-  uint64_t freq;
-  bool no_caller_saved_registers = false;
-  bool no_callee_saved_registers = false;
-  bool in_hot_list = false;
-
-  bool operator<(const Record& other) const {
-    if (freq < other.freq) return true;
-    if (freq == other.freq) return name < other.name;
-    return false;
-  }
-};
-
-void FDOAttrModification2::dumpPSI(Module &M) {
-  std::string path = OutputPSI.empty() ? std::string("/tmp/fdoipra-psi.txt")
-                                       : OutputPSI;
-  auto* PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
-  if (PSI == nullptr) return;
-
-  std::vector<Record> hot;
-  std::vector<Record> normal;
-  std::vector<Record> cold;
-
-  for (auto &F : M) {
-    if (F.isDeclaration()) continue;
-    auto* BFI = &getAnalysis<BlockFrequencyInfoWrapperPass>(F).getBFI();
-    if (!BFI) continue;
-    bool in_hot_list = hot_functions.count(F.getName().str()) != 0;
-    auto bpc = BFI->getBlockProfileCount(&F.getEntryBlock());
-    uint64_t count = 0;
-    if (bpc.hasValue()) count = bpc.getValue();
-    Record record{F.getName().str(), count,
-        F.hasFnAttribute("no_caller_saved_registers"), 
-        F.hasFnAttribute("no_callee_saved_registers"),
-        in_hot_list};
-
-    if (PSI->isFunctionEntryHot(&F))
-      hot.push_back(record);
-    else if (PSI->isFunctionEntryCold(&F))
-      cold.push_back(record);
-    else
-      normal.push_back(record);
-  }
-
-  std::sort(hot.begin(), hot.end());
-  std::sort(cold.begin(), cold.end());
-  std::sort(normal.begin(), normal.end());
-
-  std::vector<Record>* buffer[3] = {&hot,  &cold,  &normal };
-  std::vector<std::string> names = {"hot", "cold", "normal"};
-  std::ofstream fout(path, std::ios_base::out);
-  for (int i = 0; i < 3; ++i) {
-    fout << names[i] << " functions:" << std::endl;
-    for (int j = 0; j < buffer[i]->size(); ++j) {
-      Record& c = buffer[i]->at(j);
-      fout << (c.no_caller_saved_registers? "* ": "")<< (c.no_callee_saved_registers? "$ ": "") << 
-        c.name << " " << c.freq << (c.in_hot_list ? " hl" : "") << std::endl;
-    }
-  }
-}
 
 
 Pass *createFDOAttrModificationPass() { 
@@ -811,5 +880,26 @@ Pass *createFDOAttrModificationPass() {
   else 
     return new FDOAttrModification2();
 }
+
+class FDORegisterInfoCollector : public ModulePass {
+public:
+  FDORegisterInfoCollector() : ModulePass(ID) {}
+protected:
+  static char ID;
+};
+
+char FDORegisterInfoCollector::ID = 0;
+
+
+class FDORegisterMaskPropagator : public ModulePass {
+public:
+  FDORegisterMaskPropagator() : ModulePass(ID) {}
+
+protected:
+  static char ID;
+};
+
+char FDORegisterMaskPropagator::ID = 0;
+
 
 }   // namespace llvm
