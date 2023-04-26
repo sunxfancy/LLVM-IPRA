@@ -67,6 +67,8 @@ static cl::opt<bool> ChangeDWARF("fdoipra-dwarf", cl::init(false), cl::Hidden);
 
 namespace llvm {
   cl::opt<std::string> MapOutput("bbidx_map", cl::init(""), cl::Hidden);
+  static void findAllCallsite(llvm::Function &F, SmallVector<CallInst*, 64>& callsites);
+  static void markFunctionNoCalleeSaved(llvm::Function &F);
 }
 
 namespace {
@@ -123,8 +125,12 @@ class FDOQuery {
     if (use_hot_function_list &&
         hot_functions.count(f->getName().str())) return false;
     if (use_PSI) {
+      if (UseNewImpl) {
+        auto count = f->getEntryCount();
+        return count && (count->getCount() <200);
+      }
       return PSI->isFunctionEntryCold(f);
-    } else {
+    } else {  
       auto it = RP->hot_functions.find(f->getName().str());
       return it == RP->hot_functions.end() || it->second.hot_on_entry == 0;
     }
@@ -134,6 +140,10 @@ class FDOQuery {
     if (use_hot_function_list &&
         hot_functions.count(f->getName().str())) return true;
     if (use_PSI) {
+      if (UseNewImpl) {
+        auto count = f->getEntryCount();
+        return count && (count->getCount() > 20000);
+      }
       return PSI->isFunctionEntryHot(f);
     } else {
       auto it = RP->hot_functions.find(f->getName().str());
@@ -169,6 +179,42 @@ class FDOQuery {
       return RP->hot_functions.find(f->getName().str()) !=
              RP->hot_functions.end();
     }
+  }
+
+  bool isHotCallee(llvm::Function* callee) {
+    if (OnHotEntryAndHotCallGraph)
+      if (isFunctionEntryHot(callee) || isFunctionHotInCallGraph(callee)) return true;
+    else
+      if (isFunctionEntryHot(callee)) return true;
+  }
+
+  void removeHotCallsiteCases(Module& M) {
+    for (auto &F : M) {
+      if (F.isDeclaration()) continue;
+      SmallVector<CallInst*, 64> callsites;
+      llvm::findAllCallsite(F, callsites);
+      for (CallInst *call : callsites) 
+        if (!isColdCallSite(*call)) {
+          Function *callee = call->getCalledFunction();
+          if (callee && !callee->isDeclaration() && isHotCallee(callee)) 
+            if (callee->hasFnAttribute("no_callee_saved_registers")) 
+              callee->removeFnAttr("no_callee_saved_registers");
+        }
+    }
+  }
+
+
+  Function* getCloned(Function* F) {
+    if (ClonedFuncs.find(F) != ClonedFuncs.end()) {
+      return ClonedFuncs[F];
+    } 
+    ValueToValueMapTy VMap;
+    Function* clone = CloneFunction(F, VMap);
+    clone->setName(F->getName() + ".clone");
+    ClonedFuncs[F] = clone; 
+    if (clone == nullptr) { return nullptr; }
+    llvm::markFunctionNoCalleeSaved(*clone);
+    return clone;
   }
 
   bool initProfile() {
@@ -209,6 +255,7 @@ class FDOQuery {
   bool use_PSI = true;
 
   llvm::Pass* pass;
+  std::unordered_map<Function *, Function *> ClonedFuncs;
 
   ProfileSummaryInfo *PSI = nullptr;
   BlockFrequencyInfo *BFI = nullptr;
@@ -603,12 +650,6 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
     }
   }
 
-  if (OnHotEntryAndHotCallGraph) {
-    if (!isFunctionEntryHot(&F) && !isFunctionHotInCallGraph(&F)) return;
-  } else {
-    if (!isFunctionEntryHot(&F)) return;
-  }
-  
   SmallVector<CallInst *, 64> callsites;
   for (auto &BB : F)
     for (auto &MI : BB)
@@ -616,6 +657,21 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
         CallInst *call = dyn_cast<CallInst>(&MI);
         callsites.push_back(call);
       }
+
+  for (auto* call : callsites) {
+    if (ColdCallsiteColdCallee) {
+      Function *callee = call->getCalledFunction();
+      if (callee && isFunctionEntryCold(callee)) {
+        markFunctionNoCallerSaved(*callee);
+      }
+    }
+  }
+
+  if (OnHotEntryAndHotCallGraph) {
+    if (!isFunctionEntryHot(&F) && !isFunctionHotInCallGraph(&F)) return;
+  } else {
+    if (!isFunctionEntryHot(&F)) return;
+  }
 
   for (auto* call : callsites) {
     Function *callee = call->getCalledFunction();
@@ -654,8 +710,24 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
 }
 
 void FDOAttrModification::CallerToCallee(llvm::Function &F) {
-    
+  SmallVector<CallInst*, 64> callsites;
+  findAllCallsite(F, callsites);
+
+  for (CallInst *call : callsites) 
+    if (ColdCallsiteHotCallee) 
+      if (isColdCallSite(*call)) {
+        Function *callee = call->getCalledFunction();
+        if (callee && !callee->isDeclaration() && isHotCallee(callee)) {
+          if (NCSR_UseClone) {
+            Function* clone = getCloned(callee);
+            if (clone) call->setCalledFunction(clone);
+          } else {
+            markFunctionNoCalleeSaved(*callee);
+          }
+        }
+      }
 }
+
 
 bool FDOAttrModification::runOnModule(Module &M) {
   if (!initProfile()) return false;
@@ -667,8 +739,8 @@ bool FDOAttrModification::runOnModule(Module &M) {
     if (UseCalleeReg) CalleeToCaller(F);
     if (UseCallerReg) CallerToCallee(F);
   }
-// if (NCSR_UseClone == false) 
-//     removeHotCallsiteCases(M);
+  if (NCSR_UseClone == false) 
+    removeHotCallsiteCases(M);
 
   if (OutputPSI != "off") dumpPSI(M, this, this);
 
@@ -702,10 +774,6 @@ class FDOAttrModification2 : public ModulePass, public FDOQuery {
   bool runOnModule(Module &M) override;
 
  protected:
-  std::unordered_map<Function *, Function *> ClonedFuncs;
-  Function* getCloned(Function* F);
-  bool isHotCallee(llvm::Function* callee);
-  void removeHotCallsiteCases(Module& M);
   static char ID;
 };
 
@@ -783,26 +851,6 @@ void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
   }
 }
 
-Function* FDOAttrModification2::getCloned(Function* F) {
-  if (ClonedFuncs.find(F) != ClonedFuncs.end()) {
-    return ClonedFuncs[F];
-  } 
-  ValueToValueMapTy VMap;
-  Function* clone = CloneFunction(F, VMap);
-  clone->setName(F->getName() + ".clone");
-  ClonedFuncs[F] = clone; 
-  if (clone == nullptr) { return nullptr; }
-  markFunctionNoCalleeSaved(*clone);
-  return clone;
-}
-
-bool FDOAttrModification2::isHotCallee(llvm::Function* callee) {
-  if (OnHotEntryAndHotCallGraph)
-    if (isFunctionEntryHot(callee) || isFunctionHotInCallGraph(callee)) return true;
-  else
-    if (isFunctionEntryHot(callee)) return true;
-}
-
 void FDOAttrModification2::CallerToCallee(llvm::Function &F) {
   SmallVector<CallInst*, 64> callsites;
   findAllCallsite(F, callsites);
@@ -834,21 +882,6 @@ static void changeDWARFforFunction(Function &F) {
   }
 }
 
-void FDOAttrModification2::removeHotCallsiteCases(Module& M) {
-  for (auto &F : M) {
-    if (F.isDeclaration()) continue;
-    SmallVector<CallInst*, 64> callsites;
-    findAllCallsite(F, callsites);
-    for (CallInst *call : callsites) 
-      if (!isColdCallSite(*call)) {
-        Function *callee = call->getCalledFunction();
-        if (callee && !callee->isDeclaration() && isHotCallee(callee)) 
-          if (callee->hasFnAttribute("no_callee_saved_registers")) 
-            callee->removeFnAttr("no_callee_saved_registers");
-      }
-  }
-}
-
 bool FDOAttrModification2::runOnModule(Module &M) {
   if (!initProfile()) return false;
 
@@ -872,9 +905,7 @@ bool FDOAttrModification2::runOnModule(Module &M) {
   return false;
 }
 
-
-
-Pass *createFDOAttrModificationPass() { 
+Pass *createFDOAttrModificationPass() {
   if (UseNewImpl)
     return new FDOAttrModification(); 
   else 
