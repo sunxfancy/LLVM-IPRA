@@ -389,8 +389,11 @@ namespace llvm {
 
 extern cl::opt<bool> EnableFSDiscriminator;
 extern Pass* createFDOAttrModificationPass();
+extern Pass* createFDOAttrModification2Pass();
 
 static cl::opt<bool> FDO_IPRA("fdo-ipra", cl::Hidden, cl::init(false), cl::desc("Enable FDO-based IPRA"));
+extern cl::opt<bool> UseNewImpl;
+
 extern cl::opt<std::string> MapOutput;
 extern MachineFunctionPass *createMapBBIndexPass();
 
@@ -916,7 +919,10 @@ void TargetPassConfig::addIRPasses() {
     addPass(createLowerGlobalDtorsLegacyPass());
 
   if (FDO_IPRA) {
-    addPass(createFDOAttrModificationPass());
+    if (UseNewImpl)
+      addPass(createFDOAttrModificationPass());
+    else 
+      addPass(createFDOAttrModification2Pass());
   }
   
   // Make sure that no unreachable blocks are instruction selected.

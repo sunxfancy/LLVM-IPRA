@@ -151,6 +151,8 @@ void initializeExpandReductionsPass(PassRegistry&);
 void initializeExpandVectorPredicationPass(PassRegistry &);
 void initializeMakeGuardsExplicitLegacyPassPass(PassRegistry&);
 void initializeExternalAAWrapperPassPass(PassRegistry&);
+void initializeFDOAttrModificationPass(PassRegistry&);
+void initializeFDOAttrModification2Pass(PassRegistry&);
 void initializeFEntryInserterPass(PassRegistry&);
 void initializeFinalizeISelPass(PassRegistry&);
 void initializeFinalizeMachineBundlesPass(PassRegistry&);

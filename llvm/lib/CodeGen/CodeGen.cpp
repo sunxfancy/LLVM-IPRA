@@ -38,6 +38,8 @@ void llvm::initializeCodeGen(PassRegistry &Registry) {
   initializeEarlyTailDuplicatePass(Registry);
   initializeExpandMemCmpPassPass(Registry);
   initializeExpandPostRAPass(Registry);
+  initializeFDOAttrModificationPass(Registry);
+  initializeFDOAttrModification2Pass(Registry);
   initializeFEntryInserterPass(Registry);
   initializeFinalizeISelPass(Registry);
   initializeFinalizeMachineBundlesPass(Registry);

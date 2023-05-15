@@ -7,6 +7,7 @@
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/LazyBlockFrequencyInfo.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
+#include "llvm/Analysis/ModuleSummaryAnalysis.h"
 #include "llvm/CodeGen/LazyMachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
@@ -42,7 +43,6 @@ using namespace llvm;
 
 #define DEBUG_TYPE "fdo-ipra"
 
-static cl::opt<bool> UseNewImpl("fdoipra-new-impl", cl::init(false), cl::Hidden);
 
 static cl::opt<bool> OnHotEntryAndHotCallGraph("fdoipra-both-hot", cl::init(true), cl::Hidden);
 static cl::opt<bool> ColdCallsiteColdCallee("fdoipra-cc", cl::init(true), cl::Hidden);
@@ -67,6 +67,8 @@ static cl::opt<bool> ChangeDWARF("fdoipra-dwarf", cl::init(false), cl::Hidden);
 
 namespace llvm {
   cl::opt<std::string> MapOutput("bbidx_map", cl::init(""), cl::Hidden);
+  cl::opt<bool> UseNewImpl("fdoipra-new-impl", cl::init(false), cl::Hidden);
+
   static void findAllCallsite(llvm::Function &F, SmallVector<CallInst*, 64>& callsites);
   static void markFunctionNoCalleeSaved(llvm::Function &F);
 }
@@ -626,25 +628,41 @@ class FDOAttrModification : public ModulePass, public FDOQuery {
     ModulePass::getAnalysisUsage(AU);
     AU.addRequired<ProfileSummaryInfoWrapperPass>();
     AU.addRequired<BlockFrequencyInfoWrapperPass>();
+    AU.addRequired<ImmutableModuleSummaryIndexWrapperPass>();
     AU.setPreservesAll();
   }
 
   bool runOnModule(Module &M) override;
 
- protected:
   static char ID;
+ protected:
+  const ModuleSummaryIndex* msi;
 
   void CalleeToCaller(llvm::Function &F);
   void CallerToCallee(llvm::Function &F);
 };
 
-char FDOAttrModification::ID = 0;
+// if (callee) {
+      //   std::string name = GlobalValue::getGlobalIdentifier(callee->getName(), GlobalValue::ExternalLinkage, "");
+      //   auto GUID = GlobalValue::getGUID(name);
+      //   ValueInfo GV = msi->getValueInfo(GUID);
+      //   if (!GV) {
+      //     GUID = msi->getGUIDFromOriginalID(callee->getGUID());
+      //     GV = msi->getValueInfo(GUID);
+      //   }
+      //   LLVM_DEBUG(dbgs() << callee->getName() << " " << GUID << " ");
+      //   if (GV) {
+      //     auto num_of_summaries = GV.getSummaryList().size();
+      //     if (num_of_summaries != 0) LLVM_DEBUG(dbgs() << "has summary" << "\n");
+      //     else                       LLVM_DEBUG(dbgs() << "has no summary" << "\n");
+      //   } else                       LLVM_DEBUG(dbgs() << "has no summary" << "\n");
+      // }
 
 
 void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
   if (ColdCallsiteColdCallee) {
     LLVM_DEBUG(dbgs() << "Now Function: " << F.getName() << "\n");
-    if (isFunctionEntryCold(&F)) {
+    if (!F.getFunctionType()->isVarArg() && isFunctionEntryCold(&F)) {
       LLVM_DEBUG(dbgs() << "ColdFunction: " << F.getName() << "\n");
       markFunctionNoCallerSaved(F);
     }
@@ -661,8 +679,13 @@ void FDOAttrModification::CalleeToCaller(llvm::Function &F) {
   for (auto* call : callsites) {
     if (ColdCallsiteColdCallee) {
       Function *callee = call->getCalledFunction();
-      if (callee && isFunctionEntryCold(callee)) {
-        markFunctionNoCallerSaved(*callee);
+      
+      if (callee && !callee->getFunctionType()->isVarArg() && isFunctionEntryCold(callee) && msi) {
+        std::string name = GlobalValue::getGlobalIdentifier(callee->getName(), GlobalValue::ExternalLinkage, "");
+        auto GUID = GlobalValue::getGUID(name);
+        ValueInfo GV = msi->getValueInfo(GUID);
+        if (GV && !GV.getSummaryList().empty())
+          markFunctionNoCallerSaved(*callee);
       }
     }
   }
@@ -731,7 +754,8 @@ void FDOAttrModification::CallerToCallee(llvm::Function &F) {
 
 bool FDOAttrModification::runOnModule(Module &M) {
   if (!initProfile()) return false;
-
+  msi = getAnalysis<ImmutableModuleSummaryIndexWrapperPass>().getIndex();
+  
   for (auto &F : M) {
     if (F.isDeclaration()) continue;
     initBlockFreqInfo(&F);
@@ -772,12 +796,9 @@ class FDOAttrModification2 : public ModulePass, public FDOQuery {
   void CallerToCallee(llvm::Function &F);
 
   bool runOnModule(Module &M) override;
-
- protected:
   static char ID;
 };
 
-char FDOAttrModification2::ID = 0;
 
 
 void FDOAttrModification2::CalleeToCaller(llvm::Function &F) {
@@ -906,31 +927,33 @@ bool FDOAttrModification2::runOnModule(Module &M) {
 }
 
 Pass *createFDOAttrModificationPass() {
-  if (UseNewImpl)
-    return new FDOAttrModification(); 
-  else 
-    return new FDOAttrModification2();
+  return new llvm::FDOAttrModification(); 
 }
 
-class FDORegisterInfoCollector : public ModulePass {
-public:
-  FDORegisterInfoCollector() : ModulePass(ID) {}
-protected:
-  static char ID;
-};
-
-char FDORegisterInfoCollector::ID = 0;
-
-
-class FDORegisterMaskPropagator : public ModulePass {
-public:
-  FDORegisterMaskPropagator() : ModulePass(ID) {}
-
-protected:
-  static char ID;
-};
-
-char FDORegisterMaskPropagator::ID = 0;
+Pass *createFDOAttrModification2Pass() {
+  return new llvm::FDOAttrModification2();
+}
 
 
 }   // namespace llvm
+
+
+char llvm::FDOAttrModification::ID = 0;
+char llvm::FDOAttrModification2::ID = 0;
+
+
+INITIALIZE_PASS_BEGIN(FDOAttrModification, "fdo-attr-modification",
+                "FDOIPRA pass", false, false)
+INITIALIZE_PASS_DEPENDENCY(ProfileSummaryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(BlockFrequencyInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(ImmutableModuleSummaryIndexWrapperPass)
+INITIALIZE_PASS_END(FDOAttrModification, "fdo-attr-modification",
+                "FDOIPRA pass", false, false)
+
+INITIALIZE_PASS_BEGIN(FDOAttrModification2, "fdo-attr-modification2",
+                "FDOIPRA2 pass", false, false)
+INITIALIZE_PASS_DEPENDENCY(ProfileSummaryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(BlockFrequencyInfoWrapperPass)
+INITIALIZE_PASS_END(FDOAttrModification2, "fdo-attr-modification2",
+                "FDOIPRA2 pass", false, false)
+
